@@ -1,6 +1,4 @@
-#!/bin/sh
-'''exec' "/Users/jiwei/Documents/New project/自动测试埋点/venv/bin/python3" "$0" "$@"
-' '''
+#!/Users/jiwei/Documents/github/macprojects/自动测试埋点/venv/bin/python
 # -*- coding: utf-8 -*-
 import re
 import sys

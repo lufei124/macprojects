@@ -29,7 +29,7 @@ end
 # Unset irrelevant variables.
 deactivate nondestructive
 
-set -gx VIRTUAL_ENV "/Users/jiwei/Documents/New project/自动测试埋点/venv"
+set -gx VIRTUAL_ENV "/Users/jiwei/Documents/github/macprojects/自动测试埋点/venv"
 
 set -gx _OLD_VIRTUAL_PATH $PATH
 set -gx PATH "$VIRTUAL_ENV/bin" $PATH

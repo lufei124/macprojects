@@ -3,7 +3,7 @@ DB_CONFIG = {
     "port": 13306,
     "user": "root",
     "password": "1234+asdf",
-    "database": "restart_life_dev",
+    "database": "restart_life_test",
     "table": "event_logs",
 }
 
