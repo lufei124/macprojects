@@ -31,9 +31,25 @@ def health() -> Any:
 
 @app.route("/events")
 def events() -> Any:
-    device_id = request.args.get("device_id")
-    if not device_id:
-        return jsonify({"error": "device_id is required"}), 400
+    # 支持多种业务标识字段：优先 device_id，其次 role_id / user_id
+    identifier_candidates = [
+        ("device_id", request.args.get("device_id")),
+        ("role_id", request.args.get("role_id")),
+        ("user_id", request.args.get("user_id")),
+    ]
+    identifier_field: Optional[str] = None
+    identifier_value: Optional[str] = None
+    for field, value in identifier_candidates:
+        if value and value.strip():
+            identifier_field = field
+            identifier_value = value.strip()
+            break
+
+    if not identifier_field or identifier_value is None:
+        return (
+            jsonify({"error": "one of device_id / role_id / user_id is required"}),
+            400,
+        )
 
     since_id_param = request.args.get("since_id")
     since_id: Optional[int] = None
@@ -64,9 +80,9 @@ def events() -> Any:
         SELECT
             *
         FROM {table}
-        WHERE device_id = %s
+        WHERE {identifier_field} = %s
     """
-    params: List[Any] = [device_id]
+    params: List[Any] = [identifier_value]
 
     if event_names:
         placeholders = ",".join(["%s"] * len(event_names))
@@ -316,13 +332,21 @@ INDEX_HTML = """
   <body>
     <div class="container">
       <h1>埋点实时查看工具</h1>
-      <div class="subtitle">输入测试用的 device_id，保持浏览器开着，在手机上走流程时即可实时看到该设备的埋点是否落库。</div>
+      <div class="subtitle">输入测试用的标识（device_id / role_id / user_id），保持浏览器开着，在手机上走流程时即可实时看到埋点是否落库。</div>
 
       <div class="card">
         <div class="form-row">
+          <div class="field" style="width: 160px;">
+            <label for="idFieldSelect">筛选字段</label>
+            <select id="idFieldSelect">
+              <option value="device_id" selected>device_id</option>
+              <option value="role_id">role_id</option>
+              <option value="user_id">user_id</option>
+            </select>
+          </div>
           <div class="field" style="flex: 1 1 220px;">
-            <label for="deviceIdInput">device_id</label>
-            <input id="deviceIdInput" placeholder="请输入要监听的 device_id" />
+            <label for="idValueInput">字段值</label>
+            <input id="idValueInput" placeholder="请输入要监听的字段值" />
           </div>
           <div class="field" style="flex: 1 1 220px;">
             <label for="eventNameInput">事件名筛选（可选，逗号分隔）</label>
@@ -357,7 +381,7 @@ INDEX_HTML = """
           <thead>
             <tr>
               <th style="width: 110px;">时间</th>
-              <th style="width: 150px;">device_id</th>
+              <th style="width: 150px;">标识</th>
               <th style="width: 130px;">事件名</th>
               <th>全部字段（JSON）</th>
             </tr>
@@ -368,7 +392,8 @@ INDEX_HTML = """
     </div>
 
     <script>
-      const deviceIdInput = document.getElementById("deviceIdInput");
+      const idFieldSelect = document.getElementById("idFieldSelect");
+      const idValueInput = document.getElementById("idValueInput");
       const intervalInput = document.getElementById("intervalInput");
       const limitInput = document.getElementById("limitInput");
       const toggleBtn = document.getElementById("toggleBtn");
@@ -386,7 +411,7 @@ INDEX_HTML = """
       let lastMaxId = null;
       // maxSeenId：当前 user_id 已经看过的最大 id，用于传给后端 since_id，避免重复拉取
       let maxSeenId = null;
-      let lastDeviceIdForCursor = null;
+      let lastIdentifierForCursor = null;
       let clockTimerId = null;
 
       function setRunning(running) {
@@ -434,15 +459,17 @@ INDEX_HTML = """
       }
 
       async function fetchEvents() {
-        const deviceId = deviceIdInput.value.trim();
-        if (!deviceId) {
-          errorText.textContent = "请先填写 device_id";
+        const idField = (idFieldSelect.value || "device_id").trim();
+        const idValue = idValueInput.value.trim();
+        if (!idValue) {
+          errorText.textContent = "请先填写字段值";
           stop();
           return;
         }
         const limit = limitInput.value || "100";
 
-        const params = new URLSearchParams({ device_id: deviceId, limit: limit });
+        const params = new URLSearchParams({ limit: limit });
+        params.set(idField, idValue);
         const eventNameFilter = eventNameInput.value.trim();
         if (eventNameFilter) {
           params.set("event_name", eventNameFilter);
@@ -482,7 +509,7 @@ INDEX_HTML = """
             timeTd.textContent = formatTime(row.event_time);
 
             const deviceIdTd = document.createElement("td");
-            deviceIdTd.textContent = row.device_id;
+            deviceIdTd.textContent = row[idField] ?? row.device_id ?? row.role_id ?? row.user_id ?? "";
 
             const eventNameTd = document.createElement("td");
             const pill = document.createElement("span");
@@ -532,16 +559,18 @@ INDEX_HTML = """
 
       function start() {
         if (timerId) return;
-        const deviceId = deviceIdInput.value.trim();
-        if (!deviceId) {
-          errorText.textContent = "请先填写 device_id";
+        const idField = (idFieldSelect.value || "device_id").trim();
+        const idValue = idValueInput.value.trim();
+        if (!idValue) {
+          errorText.textContent = "请先填写字段值";
           return;
         }
         errorText.textContent = "";
-        // 如果切换了 device_id，就从最新开始重新拉，这时清空已见过游标
-        if (lastDeviceIdForCursor !== deviceId) {
+        // 如果切换了标识字段/值，就从最新开始重新拉，这时清空已见过游标
+        const identifier = `${idField}:${idValue}`;
+        if (lastIdentifierForCursor !== identifier) {
           maxSeenId = null;
-          lastDeviceIdForCursor = deviceId;
+          lastIdentifierForCursor = identifier;
         }
         lastMaxId = null;
         setRunning(true);
@@ -579,7 +608,7 @@ INDEX_HTML = """
         clearLogs();
       });
 
-      deviceIdInput.addEventListener("keydown", (e) => {
+      idValueInput.addEventListener("keydown", (e) => {
         if (e.key === "Enter") {
           start();
         }
