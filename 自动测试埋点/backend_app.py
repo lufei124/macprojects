@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional
 
 from flask import Flask, jsonify, render_template_string, request
 import pymysql
+import json
 
 try:
     from config import DB_CONFIG
@@ -31,25 +32,9 @@ def health() -> Any:
 
 @app.route("/events")
 def events() -> Any:
-    # 支持多种业务标识字段：优先 device_id，其次 role_id / user_id
-    identifier_candidates = [
-        ("device_id", request.args.get("device_id")),
-        ("role_id", request.args.get("role_id")),
-        ("user_id", request.args.get("user_id")),
-    ]
-    identifier_field: Optional[str] = None
-    identifier_value: Optional[str] = None
-    for field, value in identifier_candidates:
-        if value and value.strip():
-            identifier_field = field
-            identifier_value = value.strip()
-            break
-
-    if not identifier_field or identifier_value is None:
-        return (
-            jsonify({"error": "one of device_id / role_id / user_id is required"}),
-            400,
-        )
+    device_id = request.args.get("device_id", "").strip()
+    if not device_id:
+        return jsonify({"error": "device_id is required"}), 400
 
     since_id_param = request.args.get("since_id")
     since_id: Optional[int] = None
@@ -58,6 +43,14 @@ def events() -> Any:
             since_id = int(since_id_param)
         except ValueError:
             since_id = None
+
+    before_id_param = request.args.get("before_id")
+    before_id: Optional[int] = None
+    if before_id_param:
+        try:
+            before_id = int(before_id_param)
+        except ValueError:
+            before_id = None
 
     limit_param = request.args.get("limit", "100")
     try:
@@ -80,9 +73,9 @@ def events() -> Any:
         SELECT
             *
         FROM {table}
-        WHERE {identifier_field} = %s
+        WHERE device_id = %s
     """
-    params: List[Any] = [identifier_value]
+    params: List[Any] = [device_id]
 
     if event_names:
         placeholders = ",".join(["%s"] * len(event_names))
@@ -92,6 +85,10 @@ def events() -> Any:
     if since_id is not None:
         query += " AND id > %s"
         params.append(since_id)
+
+    if before_id is not None:
+        query += " AND id < %s"
+        params.append(before_id)
 
     query += " ORDER BY id DESC LIMIT %s"
     params.append(limit)
@@ -113,6 +110,15 @@ def events() -> Any:
                     item[key] = int.from_bytes(value, byteorder="big")
                 else:
                     item[key] = value.decode(errors="ignore")
+            elif isinstance(value, datetime):
+                # 统一时间字段序列化格式，避免 Flask 默认 RFC1123 格式导致前端/DB 对账不一致
+                item[key] = value.isoformat()
+
+        # JS Number 会对超大整数丢精度（> 2^53-1），这里统一转字符串，避免前端展示不准
+        for big_int_key in ("role_id", "user_id"):
+            v = item.get(big_int_key)
+            if isinstance(v, int) and abs(v) > 9007199254740991:
+                item[big_int_key] = str(v)
 
         raw_content = item.get("content")
         parsed_content: Any = raw_content
@@ -124,9 +130,6 @@ def events() -> Any:
             except Exception:
                 parsed_content = raw_content
         item["content"] = parsed_content
-        # 统一时间字段名，前端只关心一个字段
-        if "event_time" in item and isinstance(item["event_time"], datetime):
-            item["event_time"] = item["event_time"].isoformat()
         processed.append(item)
 
     return jsonify(processed)
@@ -375,6 +378,116 @@ INDEX_HTML = """
           width: 16px;
           height: 16px;
         }
+        .event-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 10px;
+          padding: 10px;
+        }
+        @media (max-width: 720px) {
+          .event-grid {
+            grid-template-columns: 1fr;
+          }
+        }
+        .event-card {
+          border: 1px solid rgba(15, 23, 42, 0.10);
+          border-radius: 14px;
+          padding: 10px 10px 8px;
+          background: #fff;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
+        .event-card:hover {
+          border-color: rgba(59, 130, 246, 0.35);
+          box-shadow: 0 10px 18px rgba(15, 23, 42, 0.10);
+        }
+        .event-card-top {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 10px;
+        }
+        .event-check {
+          display: inline-flex;
+          gap: 8px;
+          align-items: flex-start;
+          cursor: pointer;
+          user-select: none;
+        }
+        .event-check input {
+          width: 18px;
+          height: 18px;
+          margin-top: 2px;
+        }
+        .event-name {
+          font-weight: 650;
+          color: #0f172a;
+          line-height: 1.15;
+        }
+        .event-key {
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New",
+            monospace;
+          font-size: 12px;
+          color: #0f172a;
+          background: rgba(59, 130, 246, 0.10);
+          border: 1px solid rgba(59, 130, 246, 0.16);
+          border-radius: 10px;
+          padding: 3px 8px;
+          width: fit-content;
+        }
+        .event-meta {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          align-items: center;
+        }
+        .event-meta .tag {
+          font-size: 12px;
+          padding: 2px 8px;
+          border-radius: 999px;
+          border: 1px solid rgba(15, 23, 42, 0.12);
+          background: rgba(15, 23, 42, 0.03);
+          color: #0f172a;
+        }
+        .event-trigger {
+          font-size: 12px;
+          line-height: 1.25;
+        }
+        .props {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          margin-top: 8px;
+          padding: 8px;
+          border: 1px solid rgba(15, 23, 42, 0.10);
+          border-radius: 12px;
+          background: rgba(15, 23, 42, 0.02);
+        }
+        .prop {
+          display: grid;
+          grid-template-columns: 160px 120px 1fr;
+          gap: 8px;
+          align-items: start;
+        }
+        .prop-key {
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New",
+            monospace;
+          font-size: 12px;
+          background: rgba(59, 130, 246, 0.10);
+          color: #0f172a;
+          border: 1px solid rgba(59, 130, 246, 0.18);
+          border-radius: 10px;
+          padding: 4px 8px;
+          width: fit-content;
+        }
+        .prop-name {
+          font-weight: 600;
+          color: #0f172a;
+        }
+        .prop-desc {
+          line-height: 1.3;
+        }
         .picker-divider {
           height: 1px;
           margin: 6px 4px;
@@ -475,7 +588,7 @@ INDEX_HTML = """
   <body>
     <div class="container">
       <h1>埋点实时查看工具</h1>
-      <div class="subtitle">输入测试用的标识（device_id / role_id / user_id），保持浏览器开着，在手机上走流程时即可实时看到埋点是否落库。</div>
+      <div class="subtitle">输入测试用的 device_id，保持浏览器开着，在手机上走流程时即可实时看到该设备的埋点是否落库。</div>
 
       <div class="card">
         <div class="form-row">
@@ -486,17 +599,9 @@ INDEX_HTML = """
               <option value="36D2F2D1-524E-4DDB-9CD1-DF06C32E1404">纪伟的手机</option>
             </select>
           </div>
-          <div class="field" style="width: 160px;">
-            <label for="idFieldSelect">筛选字段</label>
-            <select id="idFieldSelect">
-              <option value="device_id" selected>device_id</option>
-              <option value="role_id">role_id</option>
-              <option value="user_id">user_id</option>
-            </select>
-          </div>
           <div class="field" style="flex: 1 1 220px;">
-            <label for="idValueInput">字段值</label>
-            <input id="idValueInput" placeholder="或从上方选择常用设备" />
+            <label for="deviceIdInput">device_id</label>
+            <input id="deviceIdInput" placeholder="请输入要监听的 device_id" />
           </div>
           <div class="field" style="flex: 1 1 420px;">
             <label for="eventNameInput">事件名筛选（可选）</label>
@@ -543,58 +648,48 @@ INDEX_HTML = """
             </div>
 
             <div id="eventNameCheckboxList" class="picker-list">
-              <details class="cat" open>
-                <summary class="cat-title">用户启动</summary>
-                <label class="picker-item"><input type="checkbox" value="game_start" /> 游戏启动 (game_start)</label>
-                <label class="picker-item"><input type="checkbox" value="memorySize" /> 启动资源更新结果 (memorySize)</label>
-                <label class="picker-item"><input type="checkbox" value="account_create_result" /> 账户创建成功 (account_create_result)</label>
-                <label class="picker-item"><input type="checkbox" value="role_create_complete" /> 角色创建成功 (role_create_complete)</label>
-                <label class="picker-item"><input type="checkbox" value="screen_view" /> 主要页面曝光 (screen_view)</label>
-                <label class="picker-item"><input type="checkbox" value="button_click" /> 关键按钮点击 (button_click)</label>
-              </details>
-
-              <details class="cat">
-                <summary class="cat-title">事件&剧情</summary>
-                <label class="picker-item"><input type="checkbox" value="event_trigger" /> 事件触发 (event_trigger)</label>
-                <label class="picker-item"><input type="checkbox" value="event_complete" /> 事件完成 (event_complete)</label>
-                <label class="picker-item"><input type="checkbox" value="story_enter" /> 剧情开始 (story_enter)</label>
-                <label class="picker-item"><input type="checkbox" value="story_interrupt" /> 剧情中断 (story_interrupt)</label>
-                <label class="picker-item"><input type="checkbox" value="story_complete" /> 剧情完成 (story_complete)</label>
-              </details>
-
-              <details class="cat">
-                <summary class="cat-title">游戏内操作</summary>
-                <label class="picker-item"><input type="checkbox" value="new_round" /> 人生年份推进 (new_round)</label>
-                <label class="picker-item"><input type="checkbox" value="role_death" /> 死亡 (role_death)</label>
-              </details>
-
-              <details class="cat">
-                <summary class="cat-title">三方绑定/登录</summary>
-                <label class="picker-item"><input type="checkbox" value="bind_attempt" /> 点击绑定按钮 (bind_attempt)</label>
-                <label class="picker-item"><input type="checkbox" value="bind_result" /> 绑定成功 (bind_result)</label>
-                <label class="picker-item"><input type="checkbox" value="unbind_result" /> 解除绑定成功 (unbind_result)</label>
-                <label class="picker-item"><input type="checkbox" value="switch_click" /> 点击切换账号 (switch_click)</label>
-              </details>
-
-              <details class="cat">
-                <summary class="cat-title">新手引导</summary>
-                <label class="picker-item"><input type="checkbox" value="guide_show" /> 引导展示 (guide_show)</label>
-                <label class="picker-item"><input type="checkbox" value="guide_close" /> 引导关闭 (guide_close)</label>
-              </details>
-
-              <details class="cat">
-                <summary class="cat-title">系统解锁</summary>
-                <label class="picker-item"><input type="checkbox" value="feature_status_change" /> 节点成功解锁 (feature_status_change)</label>
-                <label class="picker-item"><input type="checkbox" value="feature_locked_click" /> 点击未解锁节点 (feature_locked_click)</label>
-              </details>
-
-              <details class="cat">
-                <summary class="cat-title">公告和邮箱</summary>
-                <label class="picker-item"><input type="checkbox" value="announcement_show" /> 点击查看公告 (announcement_show)</label>
-                <label class="picker-item"><input type="checkbox" value="mail_receive" /> 收到邮件 (mail_receive)</label>
-                <label class="picker-item"><input type="checkbox" value="mail_reward" /> 领取邮件 (mail_reward)</label>
-                <label class="picker-item"><input type="checkbox" value="mail_claim_fail" /> 领取失败 (mail_claim_fail)</label>
-              </details>
+              <div class="muted" id="eventNameStaticHint">按模块分类展示，可复选；勾选会自动写入输入框。</div>
+              <select id="eventNameSelect" multiple size="14" style="width:100%;">
+                <optgroup label="用户启动">
+                  <option value="game_start">游戏启动 (game_start)</option>
+                  <option value="memorySize">启动资源更新结果 (memorySize)</option>
+                  <option value="account_create_result">账户创建成功 (account_create_result)</option>
+                  <option value="role_create_complete">角色创建成功 (role_create_complete)</option>
+                  <option value="screen_view">主要页面曝光 (screen_view)</option>
+                  <option value="button_click">关键按钮点击 (button_click)</option>
+                </optgroup>
+                <optgroup label="事件&剧情">
+                  <option value="event_trigger">事件触发 (event_trigger)</option>
+                  <option value="event_complete">事件完成 (event_complete)</option>
+                  <option value="story_enter">剧情开始 (story_enter)</option>
+                  <option value="story_interrupt">剧情中断 (story_interrupt)</option>
+                  <option value="story_complete">剧情完成 (story_complete)</option>
+                </optgroup>
+                <optgroup label="游戏内操作">
+                  <option value="new_round">人生年份推进 (new_round)</option>
+                  <option value="role_death">死亡（未测试）(role_death)</option>
+                </optgroup>
+                <optgroup label="三方绑定/登录">
+                  <option value="bind_attempt">点击绑定按钮 (bind_attempt)</option>
+                  <option value="bind_result">绑定成功（未测试）(bind_result)</option>
+                  <option value="unbind_result">解除绑定成功（未测试）(unbind_result)</option>
+                  <option value="switch_click">点击切换账号 (switch_click)</option>
+                </optgroup>
+                <optgroup label="新手引导">
+                  <option value="guide_show">引导展示 (guide_show)</option>
+                  <option value="guide_close">引导关闭 (guide_close)</option>
+                </optgroup>
+                <optgroup label="系统解锁">
+                  <option value="feature_status_change">节点成功解锁 (feature_status_change)</option>
+                  <option value="feature_locked_click">点击未解锁节点 (feature_locked_click)</option>
+                </optgroup>
+                <optgroup label="公告和邮箱">
+                  <option value="announcement_show">点击查看公告 (announcement_show)</option>
+                  <option value="mail_receive">收到邮件 (mail_receive)</option>
+                  <option value="mail_reward">领取邮件 (mail_reward)</option>
+                  <option value="mail_claim_fail">领取失败 (mail_claim_fail)</option>
+                </optgroup>
+              </select>
             </div>
           </div>
         </div>
@@ -617,8 +712,7 @@ INDEX_HTML = """
 
     <script>
       const devicePresetSelect = document.getElementById("devicePresetSelect");
-      const idFieldSelect = document.getElementById("idFieldSelect");
-      const idValueInput = document.getElementById("idValueInput");
+      const deviceIdInput = document.getElementById("deviceIdInput");
       const intervalInput = document.getElementById("intervalInput");
       const limitInput = document.getElementById("limitInput");
       const toggleBtn = document.getElementById("toggleBtn");
@@ -636,13 +730,28 @@ INDEX_HTML = """
       const eventNameModalCloseBtn = document.getElementById("eventNameModalCloseBtn");
       const eventNameSearch = document.getElementById("eventNameSearch");
       const eventNameCheckboxList = document.getElementById("eventNameCheckboxList");
+      const eventNameStaticHint = document.getElementById("eventNameStaticHint");
+      const eventNameSelect = document.getElementById("eventNameSelect");
       const eventNameClearBtn = document.getElementById("eventNameClearBtn");
+
+      // 将前端运行时错误直接展示在页面上，便于快速定位
+      window.addEventListener("error", (e) => {
+        try {
+          const msg = e?.message || "前端脚本错误";
+          errorText.textContent = msg;
+        } catch (_) {}
+      });
+      window.addEventListener("unhandledrejection", (e) => {
+        try {
+          const msg = e?.reason?.message || String(e?.reason || "Promise 错误");
+          errorText.textContent = msg;
+        } catch (_) {}
+      });
 
       devicePresetSelect.addEventListener("change", () => {
         const v = devicePresetSelect.value;
         if (v) {
-          idFieldSelect.value = "device_id";
-          idValueInput.value = v;
+          deviceIdInput.value = v;
         }
       });
 
@@ -660,34 +769,42 @@ INDEX_HTML = """
 
       function syncCheckboxesFromInput() {
         const selected = new Set(normalizeEventNameList(eventNameInput.value));
-        const inputs = eventNameCheckboxList.querySelectorAll('input[type="checkbox"]');
-        inputs.forEach((cb) => {
-          cb.checked = selected.has(cb.value);
-        });
+        const options = eventNameSelect.options;
+        for (let i = 0; i < options.length; i++) {
+          const opt = options[i];
+          if (!opt.value) continue;
+          opt.selected = selected.has(opt.value);
+        }
       }
 
       function syncInputFromCheckboxes() {
-        const inputs = eventNameCheckboxList.querySelectorAll('input[type="checkbox"]');
-        const values = [];
-        inputs.forEach((cb) => {
-          if (cb.checked) values.push(cb.value);
-        });
+        const values = Array.from(eventNameSelect.selectedOptions).map((o) => o.value);
         setEventNameInput(values);
       }
 
       function filterEventCheckboxes() {
         const q = (eventNameSearch.value || "").trim().toLowerCase();
-        const items = eventNameCheckboxList.querySelectorAll(".picker-item");
-        items.forEach((label) => {
-          const text = (label.textContent || "").toLowerCase();
-          label.style.display = !q || text.includes(q) ? "" : "none";
-        });
+        const options = eventNameSelect.options;
+        for (let i = 0; i < options.length; i++) {
+          const opt = options[i];
+          const text = (opt.textContent || "").toLowerCase();
+          // 无法真正隐藏 option（各浏览器差异大），用 disabled 模拟过滤
+          opt.disabled = !!q && !text.includes(q);
+        }
+      }
+
+      function renderCatalog() {
+        // select/optgroup 已在 HTML 里固定，这里只做同步
+        eventNameStaticHint.style.display = "";
+        syncCheckboxesFromInput();
+        filterEventCheckboxes();
       }
 
       function setEventModalOpen(open) {
         eventNameModal.style.display = open ? "flex" : "none";
         document.body.style.overflow = open ? "hidden" : "";
         if (open) {
+          renderCatalog();
           eventNameSearch.focus();
         } else {
           eventNameSearch.value = "";
@@ -722,10 +839,8 @@ INDEX_HTML = """
         }
       });
 
-      eventNameCheckboxList.addEventListener("change", (e) => {
-        if (e.target && e.target.matches('input[type="checkbox"]')) {
-          syncInputFromCheckboxes();
-        }
+      eventNameSelect.addEventListener("change", () => {
+        syncInputFromCheckboxes();
       });
 
       eventNameInput.addEventListener("input", () => {
@@ -747,8 +862,8 @@ INDEX_HTML = """
       syncCheckboxesFromInput();
       filterEventCheckboxes();
 
-      idValueInput.addEventListener("input", () => {
-        const cur = idValueInput.value.trim();
+      deviceIdInput.addEventListener("input", () => {
+        const cur = deviceIdInput.value.trim();
         let matched = false;
         for (const opt of devicePresetSelect.options) {
           if (opt.value && opt.value === cur) {
@@ -769,6 +884,7 @@ INDEX_HTML = """
       let maxSeenId = null;
       let lastIdentifierForCursor = null;
       let clockTimerId = null;
+      let clearBaselineId = null;
 
       function setRunning(running) {
         if (running) {
@@ -815,24 +931,22 @@ INDEX_HTML = """
       }
 
       async function fetchEvents() {
-        const idField = (idFieldSelect.value || "device_id").trim();
-        const idValue = idValueInput.value.trim();
-        if (!idValue) {
-          errorText.textContent = "请先填写字段值";
+        const deviceId = deviceIdInput.value.trim();
+        if (!deviceId) {
+          errorText.textContent = "请先填写 device_id";
           stop();
           return;
         }
         const limit = limitInput.value || "100";
 
         const params = new URLSearchParams({ limit: limit });
-        params.set(idField, idValue);
+        params.set("device_id", deviceId);
         const eventNameFilter = eventNameInput.value.trim();
         if (eventNameFilter) {
           params.set("event_name", eventNameFilter);
         }
-        if (maxSeenId) {
-          params.set("since_id", String(maxSeenId));
-        }
+        const since = maxSeenId ?? clearBaselineId;
+        if (since) params.set("since_id", String(since));
 
         try {
           const res = await fetch("/events?" + params.toString());
@@ -865,7 +979,7 @@ INDEX_HTML = """
             timeTd.textContent = formatTime(row.event_time);
 
             const deviceIdTd = document.createElement("td");
-            deviceIdTd.textContent = row[idField] ?? row.device_id ?? row.role_id ?? row.user_id ?? "";
+            deviceIdTd.textContent = row.device_id ?? "";
 
             const eventNameTd = document.createElement("td");
             const pill = document.createElement("span");
@@ -915,18 +1029,16 @@ INDEX_HTML = """
 
       function start() {
         if (timerId) return;
-        const idField = (idFieldSelect.value || "device_id").trim();
-        const idValue = idValueInput.value.trim();
-        if (!idValue) {
-          errorText.textContent = "请先填写字段值";
+        const deviceId = deviceIdInput.value.trim();
+        if (!deviceId) {
+          errorText.textContent = "请先填写 device_id";
           return;
         }
         errorText.textContent = "";
-        // 如果切换了标识字段/值，就从最新开始重新拉，这时清空已见过游标
-        const identifier = `${idField}:${idValue}`;
-        if (lastIdentifierForCursor !== identifier) {
+        // 如果切换了 device_id，就从最新开始重新拉，这时清空已见过游标
+        if (lastIdentifierForCursor !== deviceId) {
           maxSeenId = null;
-          lastIdentifierForCursor = identifier;
+          lastIdentifierForCursor = deviceId;
         }
         lastMaxId = null;
         setRunning(true);
@@ -945,9 +1057,11 @@ INDEX_HTML = """
       }
 
       function clearLogs() {
+        // 目标：清空后不再把旧数据重新展示出来，只展示“清空之后新增”的数据
+        clearBaselineId = maxSeenId ?? clearBaselineId;
         tbody.innerHTML = "";
-        // 只清空前端展示，不重置 maxSeenId，这样之后只会拉取“比已见过 id 更大的新数据”
         lastMaxId = null;
+        maxSeenId = null;
         metaText.textContent = "";
         errorText.textContent = "";
       }
@@ -964,7 +1078,8 @@ INDEX_HTML = """
         clearLogs();
       });
 
-      idValueInput.addEventListener("keydown", (e) => {
+
+      deviceIdInput.addEventListener("keydown", (e) => {
         if (e.key === "Enter") {
           start();
         }
