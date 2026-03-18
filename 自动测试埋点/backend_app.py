@@ -322,6 +322,149 @@ INDEX_HTML = """
         .btn {
           justify-content: center;
         }
+        details.picker {
+          position: relative;
+        }
+        .picker-summary {
+          cursor: pointer;
+          user-select: none;
+          padding: 10px 12px;
+          border: 1px solid rgba(15, 23, 42, 0.12);
+          border-radius: 12px;
+          background: #fff;
+          font-size: 14px;
+          line-height: 1.2;
+        }
+        .picker-panel {
+          margin-top: 10px;
+          padding: 12px;
+          border: 1px solid rgba(15, 23, 42, 0.12);
+          border-radius: 12px;
+          background: #fff;
+        }
+        .picker-actions {
+          display: flex;
+          gap: 10px;
+          align-items: center;
+          margin-bottom: 8px;
+        }
+        .picker-actions input {
+          flex: 1;
+          min-width: 180px;
+        }
+        .picker-list {
+          max-height: none;
+          overflow: visible;
+          border: 1px solid rgba(15, 23, 42, 0.08);
+          border-radius: 10px;
+          padding: 4px;
+          background: rgba(15, 23, 42, 0.02);
+        }
+        .picker-item {
+          display: flex;
+          gap: 8px;
+          align-items: center;
+          padding: 6px 8px;
+          border-radius: 8px;
+          cursor: pointer;
+        }
+        .picker-item:hover {
+          background: rgba(59, 130, 246, 0.08);
+        }
+        .picker-item input {
+          width: 16px;
+          height: 16px;
+        }
+        .picker-divider {
+          height: 1px;
+          margin: 6px 4px;
+          background: rgba(15, 23, 42, 0.10);
+        }
+        .dropdown {
+          position: relative;
+        }
+        .dropdown-input-row {
+          display: flex;
+          gap: 8px;
+          align-items: center;
+        }
+        .dropdown-toggle-btn {
+          white-space: nowrap;
+          padding: 10px 12px;
+        }
+        .modal {
+          position: fixed;
+          inset: 0;
+          z-index: 9999;
+          display: none;
+          align-items: flex-start;
+          justify-content: center;
+          padding: 10vh 16px 16px;
+        }
+        .modal-backdrop {
+          position: absolute;
+          inset: 0;
+          background: rgba(15, 23, 42, 0.45);
+          backdrop-filter: blur(2px);
+        }
+        .modal-card {
+          position: relative;
+          width: min(720px, 92vw);
+          max-height: 80vh;
+          overflow: hidden;
+          border-radius: 16px;
+          background: #fff;
+          border: 1px solid rgba(15, 23, 42, 0.12);
+          box-shadow: 0 24px 60px rgba(15, 23, 42, 0.30);
+        }
+        .modal-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 12px 14px;
+          border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+          background: rgba(15, 23, 42, 0.02);
+        }
+        .modal-title {
+          font-weight: 650;
+          color: #0f172a;
+        }
+        .modal-body {
+          padding: 12px;
+          max-height: calc(80vh - 56px);
+          overflow: auto;
+        }
+        .icon-btn {
+          border: 1px solid rgba(15, 23, 42, 0.12);
+          background: #fff;
+          border-radius: 10px;
+          padding: 6px 10px;
+          cursor: pointer;
+        }
+        .icon-btn:hover {
+          background: rgba(59, 130, 246, 0.08);
+        }
+        details.cat {
+          border: 1px solid rgba(15, 23, 42, 0.08);
+          border-radius: 12px;
+          background: #fff;
+          margin-bottom: 8px;
+          overflow: hidden;
+        }
+        details.cat[open] {
+          background: rgba(15, 23, 42, 0.01);
+        }
+        .cat-title {
+          cursor: pointer;
+          user-select: none;
+          padding: 8px 10px;
+          font-weight: 600;
+          color: #0f172a;
+          background: rgba(15, 23, 42, 0.03);
+        }
+        details.cat .picker-item {
+          padding: 6px 10px;
+        }
         th:nth-child(2),
         td:nth-child(2) {
           display: none;
@@ -355,9 +498,12 @@ INDEX_HTML = """
             <label for="idValueInput">字段值</label>
             <input id="idValueInput" placeholder="或从上方选择常用设备" />
           </div>
-          <div class="field" style="flex: 1 1 220px;">
-            <label for="eventNameInput">事件名筛选（可选，逗号分隔）</label>
-            <input id="eventNameInput" placeholder="如：button_click,event_complete" />
+          <div class="field" style="flex: 1 1 420px;">
+            <label for="eventNameInput">事件名筛选（可选）</label>
+            <div class="dropdown-input-row">
+              <input id="eventNameInput" placeholder="支持逗号分隔多个；也可点右侧选择" />
+              <button id="eventNameToggleBtn" type="button" class="btn btn-secondary dropdown-toggle-btn">选择</button>
+            </div>
           </div>
           <div class="field" style="width: 120px;">
             <label for="intervalInput">轮询间隔（秒）</label>
@@ -380,6 +526,77 @@ INDEX_HTML = """
             <span id="clockText" class="muted" style="margin-left: 8px;"></span>
           </div>
           <div class="muted" id="metaText"></div>
+        </div>
+      </div>
+
+      <div id="eventNameModal" class="modal" style="display:none;">
+        <div id="eventNameModalBackdrop" class="modal-backdrop"></div>
+        <div class="modal-card" role="dialog" aria-modal="true" aria-label="选择事件名">
+          <div class="modal-header">
+            <div class="modal-title">选择事件名（可复选）</div>
+            <button id="eventNameModalCloseBtn" type="button" class="icon-btn">关闭</button>
+          </div>
+          <div class="modal-body">
+            <div class="picker-actions" style="margin-bottom: 8px;">
+              <input id="eventNameSearch" placeholder="搜索事件名/标识符，如：button / story" />
+              <button id="eventNameClearBtn" type="button" class="btn btn-secondary" style="padding:8px 10px;">清空</button>
+            </div>
+
+            <div id="eventNameCheckboxList" class="picker-list">
+              <details class="cat" open>
+                <summary class="cat-title">用户启动</summary>
+                <label class="picker-item"><input type="checkbox" value="game_start" /> 游戏启动 (game_start)</label>
+                <label class="picker-item"><input type="checkbox" value="memorySize" /> 启动资源更新结果 (memorySize)</label>
+                <label class="picker-item"><input type="checkbox" value="account_create_result" /> 账户创建成功 (account_create_result)</label>
+                <label class="picker-item"><input type="checkbox" value="role_create_complete" /> 角色创建成功 (role_create_complete)</label>
+                <label class="picker-item"><input type="checkbox" value="screen_view" /> 主要页面曝光 (screen_view)</label>
+                <label class="picker-item"><input type="checkbox" value="button_click" /> 关键按钮点击 (button_click)</label>
+              </details>
+
+              <details class="cat">
+                <summary class="cat-title">事件&剧情</summary>
+                <label class="picker-item"><input type="checkbox" value="event_trigger" /> 事件触发 (event_trigger)</label>
+                <label class="picker-item"><input type="checkbox" value="event_complete" /> 事件完成 (event_complete)</label>
+                <label class="picker-item"><input type="checkbox" value="story_enter" /> 剧情开始 (story_enter)</label>
+                <label class="picker-item"><input type="checkbox" value="story_interrupt" /> 剧情中断 (story_interrupt)</label>
+                <label class="picker-item"><input type="checkbox" value="story_complete" /> 剧情完成 (story_complete)</label>
+              </details>
+
+              <details class="cat">
+                <summary class="cat-title">游戏内操作</summary>
+                <label class="picker-item"><input type="checkbox" value="new_round" /> 人生年份推进 (new_round)</label>
+                <label class="picker-item"><input type="checkbox" value="role_death" /> 死亡 (role_death)</label>
+              </details>
+
+              <details class="cat">
+                <summary class="cat-title">三方绑定/登录</summary>
+                <label class="picker-item"><input type="checkbox" value="bind_attempt" /> 点击绑定按钮 (bind_attempt)</label>
+                <label class="picker-item"><input type="checkbox" value="bind_result" /> 绑定成功 (bind_result)</label>
+                <label class="picker-item"><input type="checkbox" value="unbind_result" /> 解除绑定成功 (unbind_result)</label>
+                <label class="picker-item"><input type="checkbox" value="switch_click" /> 点击切换账号 (switch_click)</label>
+              </details>
+
+              <details class="cat">
+                <summary class="cat-title">新手引导</summary>
+                <label class="picker-item"><input type="checkbox" value="guide_show" /> 引导展示 (guide_show)</label>
+                <label class="picker-item"><input type="checkbox" value="guide_close" /> 引导关闭 (guide_close)</label>
+              </details>
+
+              <details class="cat">
+                <summary class="cat-title">系统解锁</summary>
+                <label class="picker-item"><input type="checkbox" value="feature_status_change" /> 节点成功解锁 (feature_status_change)</label>
+                <label class="picker-item"><input type="checkbox" value="feature_locked_click" /> 点击未解锁节点 (feature_locked_click)</label>
+              </details>
+
+              <details class="cat">
+                <summary class="cat-title">公告和邮箱</summary>
+                <label class="picker-item"><input type="checkbox" value="announcement_show" /> 点击查看公告 (announcement_show)</label>
+                <label class="picker-item"><input type="checkbox" value="mail_receive" /> 收到邮件 (mail_receive)</label>
+                <label class="picker-item"><input type="checkbox" value="mail_reward" /> 领取邮件 (mail_reward)</label>
+                <label class="picker-item"><input type="checkbox" value="mail_claim_fail" /> 领取失败 (mail_claim_fail)</label>
+              </details>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -413,6 +630,13 @@ INDEX_HTML = """
       const metaText = document.getElementById("metaText");
       const clockText = document.getElementById("clockText");
       const eventNameInput = document.getElementById("eventNameInput");
+      const eventNameToggleBtn = document.getElementById("eventNameToggleBtn");
+      const eventNameModal = document.getElementById("eventNameModal");
+      const eventNameModalBackdrop = document.getElementById("eventNameModalBackdrop");
+      const eventNameModalCloseBtn = document.getElementById("eventNameModalCloseBtn");
+      const eventNameSearch = document.getElementById("eventNameSearch");
+      const eventNameCheckboxList = document.getElementById("eventNameCheckboxList");
+      const eventNameClearBtn = document.getElementById("eventNameClearBtn");
 
       devicePresetSelect.addEventListener("change", () => {
         const v = devicePresetSelect.value;
@@ -421,6 +645,107 @@ INDEX_HTML = """
           idValueInput.value = v;
         }
       });
+
+      function normalizeEventNameList(text) {
+        return String(text || "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
+
+      function setEventNameInput(values) {
+        const unique = Array.from(new Set(values.map((v) => String(v).trim()).filter(Boolean)));
+        eventNameInput.value = unique.join(",");
+      }
+
+      function syncCheckboxesFromInput() {
+        const selected = new Set(normalizeEventNameList(eventNameInput.value));
+        const inputs = eventNameCheckboxList.querySelectorAll('input[type="checkbox"]');
+        inputs.forEach((cb) => {
+          cb.checked = selected.has(cb.value);
+        });
+      }
+
+      function syncInputFromCheckboxes() {
+        const inputs = eventNameCheckboxList.querySelectorAll('input[type="checkbox"]');
+        const values = [];
+        inputs.forEach((cb) => {
+          if (cb.checked) values.push(cb.value);
+        });
+        setEventNameInput(values);
+      }
+
+      function filterEventCheckboxes() {
+        const q = (eventNameSearch.value || "").trim().toLowerCase();
+        const items = eventNameCheckboxList.querySelectorAll(".picker-item");
+        items.forEach((label) => {
+          const text = (label.textContent || "").toLowerCase();
+          label.style.display = !q || text.includes(q) ? "" : "none";
+        });
+      }
+
+      function setEventModalOpen(open) {
+        eventNameModal.style.display = open ? "flex" : "none";
+        document.body.style.overflow = open ? "hidden" : "";
+        if (open) {
+          eventNameSearch.focus();
+        } else {
+          eventNameSearch.value = "";
+          filterEventCheckboxes();
+        }
+      }
+
+      function isEventModalOpen() {
+        return eventNameModal.style.display !== "none";
+      }
+
+      eventNameToggleBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        setEventModalOpen(!isEventModalOpen());
+      });
+
+      eventNameInput.addEventListener("focus", () => {
+        // 聚焦输入框时不强制展开，避免打字被打断；需要展开可点“选择”
+      });
+
+      eventNameModalBackdrop.addEventListener("click", () => {
+        if (isEventModalOpen()) setEventModalOpen(false);
+      });
+
+      eventNameModalCloseBtn.addEventListener("click", () => {
+        if (isEventModalOpen()) setEventModalOpen(false);
+      });
+
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && isEventModalOpen()) {
+          setEventModalOpen(false);
+        }
+      });
+
+      eventNameCheckboxList.addEventListener("change", (e) => {
+        if (e.target && e.target.matches('input[type="checkbox"]')) {
+          syncInputFromCheckboxes();
+        }
+      });
+
+      eventNameInput.addEventListener("input", () => {
+        syncCheckboxesFromInput();
+      });
+
+      eventNameSearch.addEventListener("input", () => {
+        filterEventCheckboxes();
+      });
+
+      eventNameClearBtn.addEventListener("click", () => {
+        setEventNameInput([]);
+        syncCheckboxesFromInput();
+        eventNameSearch.value = "";
+        filterEventCheckboxes();
+      });
+
+      // 初始化一次
+      syncCheckboxesFromInput();
+      filterEventCheckboxes();
 
       idValueInput.addEventListener("input", () => {
         const cur = idValueInput.value.trim();
