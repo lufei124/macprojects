@@ -336,6 +336,13 @@ INDEX_HTML = """
 
       <div class="card">
         <div class="form-row">
+          <div class="field" style="width: 180px;">
+            <label for="devicePresetSelect">常用设备</label>
+            <select id="devicePresetSelect">
+              <option value="">自定义（手动输入）</option>
+              <option value="36D2F2D1-524E-4DDB-9CD1-DF06C32E1404">纪伟的手机</option>
+            </select>
+          </div>
           <div class="field" style="width: 160px;">
             <label for="idFieldSelect">筛选字段</label>
             <select id="idFieldSelect">
@@ -346,7 +353,7 @@ INDEX_HTML = """
           </div>
           <div class="field" style="flex: 1 1 220px;">
             <label for="idValueInput">字段值</label>
-            <input id="idValueInput" placeholder="请输入要监听的字段值" />
+            <input id="idValueInput" placeholder="或从上方选择常用设备" />
           </div>
           <div class="field" style="flex: 1 1 220px;">
             <label for="eventNameInput">事件名筛选（可选，逗号分隔）</label>
@@ -392,6 +399,7 @@ INDEX_HTML = """
     </div>
 
     <script>
+      const devicePresetSelect = document.getElementById("devicePresetSelect");
       const idFieldSelect = document.getElementById("idFieldSelect");
       const idValueInput = document.getElementById("idValueInput");
       const intervalInput = document.getElementById("intervalInput");
@@ -405,6 +413,29 @@ INDEX_HTML = """
       const metaText = document.getElementById("metaText");
       const clockText = document.getElementById("clockText");
       const eventNameInput = document.getElementById("eventNameInput");
+
+      devicePresetSelect.addEventListener("change", () => {
+        const v = devicePresetSelect.value;
+        if (v) {
+          idFieldSelect.value = "device_id";
+          idValueInput.value = v;
+        }
+      });
+
+      idValueInput.addEventListener("input", () => {
+        const cur = idValueInput.value.trim();
+        let matched = false;
+        for (const opt of devicePresetSelect.options) {
+          if (opt.value && opt.value === cur) {
+            matched = true;
+            devicePresetSelect.value = opt.value;
+            break;
+          }
+        }
+        if (!matched && devicePresetSelect.value) {
+          devicePresetSelect.value = "";
+        }
+      });
 
       let timerId = null;
       // lastMaxId：本次会话中用于控制“首屏覆盖 / 增量插入”的游标
