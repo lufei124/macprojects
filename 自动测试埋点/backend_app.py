@@ -6,21 +6,22 @@ import pymysql
 import json
 
 try:
-    from config import DB_CONFIG
+    from config import DB_CONFIGS, DEFAULT_ENV
 except ImportError:
-    from config.example import DB_CONFIG  # type: ignore
+    from config.example import DB_CONFIGS, DEFAULT_ENV  # type: ignore
 
 
 app = Flask(__name__)
 
 
-def get_connection():
+def get_connection(env: str = DEFAULT_ENV):
+    cfg = DB_CONFIGS.get(env, DB_CONFIGS[DEFAULT_ENV])
     return pymysql.connect(
-        host=DB_CONFIG["host"],
-        port=DB_CONFIG.get("port", 3306),
-        user=DB_CONFIG["user"],
-        password=DB_CONFIG["password"],
-        database=DB_CONFIG["database"],
+        host=cfg["host"],
+        port=cfg.get("port", 3306),
+        user=cfg["user"],
+        password=cfg["password"],
+        database=cfg["database"],
         cursorclass=pymysql.cursors.DictCursor,
     )
 
@@ -30,11 +31,23 @@ def health() -> Any:
     return jsonify({"status": "ok"})
 
 
+@app.route("/envs")
+def envs() -> Any:
+    return jsonify({
+        key: {"name": cfg.get("name", key), "available": bool(cfg.get("host"))}
+        for key, cfg in DB_CONFIGS.items()
+    })
+
+
 @app.route("/events")
 def events() -> Any:
     device_id = request.args.get("device_id", "").strip()
     if not device_id:
         return jsonify({"error": "device_id is required"}), 400
+
+    env = request.args.get("env", DEFAULT_ENV).strip()
+    if env not in DB_CONFIGS:
+        return jsonify({"error": f"invalid env: {env}"}), 400
 
     since_id_param = request.args.get("since_id")
     since_id: Optional[int] = None
@@ -58,9 +71,8 @@ def events() -> Any:
     except ValueError:
         limit = 100
 
-    table = DB_CONFIG["table"]
+    table = DB_CONFIGS[env]["table"]
 
-    # 事件筛选：可选参数 event_name，支持逗号分隔多个事件名
     raw_event_names = request.args.get("event_name", "").strip()
     event_names: List[str] = []
     if raw_event_names:
@@ -93,28 +105,23 @@ def events() -> Any:
     query += " ORDER BY id DESC LIMIT %s"
     params.append(limit)
 
-    with get_connection() as conn:
+    with get_connection(env) as conn:
         with conn.cursor() as cursor:
             cursor.execute(query, params)
             rows: List[Dict[str, Any]] = cursor.fetchall()
 
-    # 处理行数据：content 尝试解析 JSON；bytes 字段（如 bit(1)）转成整数，时间转成字符串
     processed: List[Dict[str, Any]] = []
     for row in rows:
         item = dict(row)
-        # 将所有 bytes 转成数字或字符串，避免 jsonify 报错
         for key, value in list(item.items()):
             if isinstance(value, bytes):
-                # 对于 bit(1) 这类字段，转换为 0/1 的 int，更直观
                 if len(value) == 1:
                     item[key] = int.from_bytes(value, byteorder="big")
                 else:
                     item[key] = value.decode(errors="ignore")
             elif isinstance(value, datetime):
-                # 统一时间字段序列化格式，避免 Flask 默认 RFC1123 格式导致前端/DB 对账不一致
                 item[key] = value.isoformat()
 
-        # JS Number 会对超大整数丢精度（> 2^53-1），这里统一转字符串，避免前端展示不准
         for big_int_key in ("role_id", "user_id"):
             v = item.get(big_int_key)
             if isinstance(v, int) and abs(v) > 9007199254740991:
@@ -124,8 +131,6 @@ def events() -> Any:
         parsed_content: Any = raw_content
         if isinstance(raw_content, str):
             try:
-                import json
-
                 parsed_content = json.loads(raw_content)
             except Exception:
                 parsed_content = raw_content
@@ -138,954 +143,597 @@ def events() -> Any:
 INDEX_HTML = """
 <!doctype html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <title>埋点实时查看工具</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <style>
-      body {
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        margin: 0;
-        padding: 0;
-        background: #f5f5f7;
-        color: #111827;
-      }
-      .container {
-        max-width: 1100px;
-        margin: 0 auto;
-        padding: 24px 16px 40px;
-      }
-      h1 {
-        font-size: 24px;
-        margin-bottom: 4px;
-      }
-      .subtitle {
-        font-size: 13px;
-        color: #6b7280;
-        margin-bottom: 20px;
-      }
-      .card {
-        background: #ffffff;
-        border-radius: 12px;
-        padding: 16px 16px 10px;
-        box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
-        margin-bottom: 16px;
-      }
-      .form-row {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 12px;
-        align-items: flex-end;
-      }
-      .field {
-        display: flex;
-        flex-direction: column;
-        min-width: 0;
-      }
-      .field label {
-        font-size: 12px;
-        color: #4b5563;
-        margin-bottom: 4px;
-      }
-      .field input {
-        border-radius: 8px;
-        border: 1px solid #d1d5db;
-        padding: 6px 10px;
-        font-size: 13px;
-        min-width: 0;
-      }
-      .field input:focus {
-        outline: none;
-        border-color: #2563eb;
-        box-shadow: 0 0 0 1px #2563eb33;
-      }
-      .btn {
-        border-radius: 999px;
-        border: none;
-        padding: 8px 18px;
-        font-size: 13px;
-        font-weight: 500;
-        cursor: pointer;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        gap: 6px;
-        transition: background 0.15s ease, box-shadow 0.15s ease, transform 0.08s ease;
-      }
-      .btn-primary {
-        background: #2563eb;
-        color: white;
-        box-shadow: 0 8px 18px rgba(37, 99, 235, 0.35);
-      }
-      .btn-primary:hover {
-        background: #1d4ed8;
-        transform: translateY(-1px);
-      }
-      .btn-secondary {
-        background: #e5e7eb;
-        color: #111827;
-      }
-      .status-line {
-        margin-top: 10px;
-        font-size: 12px;
-        color: #6b7280;
-        display: flex;
-        justify-content: space-between;
-        gap: 12px;
-      }
-      .status-pill {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 2px 8px;
-        border-radius: 999px;
-        background: #ecfdf3;
-        color: #166534;
-        font-size: 11px;
-      }
-      .status-dot {
-        width: 7px;
-        height: 7px;
-        border-radius: 999px;
-        background: #22c55e;
-      }
-      table {
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 12px;
-        table-layout: fixed;
-      }
-      thead {
-        background: #f9fafb;
-      }
-      th,
-      td {
-        padding: 6px 8px;
-        border-bottom: 1px solid #e5e7eb;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-      th {
-        text-align: left;
-        font-weight: 500;
-        color: #4b5563;
-      }
-      tbody tr:nth-child(even) {
-        background: #f9fafb;
-      }
-      tbody tr.highlight {
-        animation: highlight 1.5s ease-out;
-      }
-      @keyframes highlight {
-        0% {
-          background-color: #fef3c7;
-        }
-        100% {
-          background-color: transparent;
-        }
-      }
-      .pill {
-        display: inline-flex;
-        align-items: center;
-        padding: 1px 6px;
-        border-radius: 999px;
-        background: #eff6ff;
-        color: #1d4ed8;
-        font-size: 11px;
-      }
-      .muted {
-        color: #9ca3af;
-        font-size: 11px;
-      }
-      .scroll-container {
-        margin-top: 4px;
-        max-height: 480px;
-        overflow: auto;
-        border-radius: 10px;
-        border: 1px solid #e5e7eb;
-        background: #ffffff;
-      }
-      pre {
-        margin: 0;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-        font-size: 11px;
-        white-space: pre-wrap;
-        word-break: break-all;
-      }
-      @media (max-width: 720px) {
-        .form-row {
-          flex-direction: column;
-          align-items: stretch;
-        }
-        .field,
-        .btn {
-          width: 100%;
-        }
-        .btn {
-          justify-content: center;
-        }
-        details.picker {
-          position: relative;
-        }
-        .picker-summary {
-          cursor: pointer;
-          user-select: none;
-          padding: 10px 12px;
-          border: 1px solid rgba(15, 23, 42, 0.12);
-          border-radius: 12px;
-          background: #fff;
-          font-size: 14px;
-          line-height: 1.2;
-        }
-        .picker-panel {
-          margin-top: 10px;
-          padding: 12px;
-          border: 1px solid rgba(15, 23, 42, 0.12);
-          border-radius: 12px;
-          background: #fff;
-        }
-        .picker-actions {
-          display: flex;
-          gap: 10px;
-          align-items: center;
-          margin-bottom: 8px;
-        }
-        .picker-actions input {
-          flex: 1;
-          min-width: 180px;
-        }
-        .picker-list {
-          max-height: none;
-          overflow: visible;
-          border: 1px solid rgba(15, 23, 42, 0.08);
-          border-radius: 10px;
-          padding: 4px;
-          background: rgba(15, 23, 42, 0.02);
-        }
-        .picker-item {
-          display: flex;
-          gap: 8px;
-          align-items: center;
-          padding: 6px 8px;
-          border-radius: 8px;
-          cursor: pointer;
-        }
-        .picker-item:hover {
-          background: rgba(59, 130, 246, 0.08);
-        }
-        .picker-item input {
-          width: 16px;
-          height: 16px;
-        }
-        .event-grid {
-          display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 10px;
-          padding: 10px;
-        }
-        @media (max-width: 720px) {
-          .event-grid {
-            grid-template-columns: 1fr;
-          }
-        }
-        .event-card {
-          border: 1px solid rgba(15, 23, 42, 0.10);
-          border-radius: 14px;
-          padding: 10px 10px 8px;
-          background: #fff;
-          display: flex;
-          flex-direction: column;
-          gap: 6px;
-        }
-        .event-card:hover {
-          border-color: rgba(59, 130, 246, 0.35);
-          box-shadow: 0 10px 18px rgba(15, 23, 42, 0.10);
-        }
-        .event-card-top {
-          display: flex;
-          align-items: flex-start;
-          justify-content: space-between;
-          gap: 10px;
-        }
-        .event-check {
-          display: inline-flex;
-          gap: 8px;
-          align-items: flex-start;
-          cursor: pointer;
-          user-select: none;
-        }
-        .event-check input {
-          width: 18px;
-          height: 18px;
-          margin-top: 2px;
-        }
-        .event-name {
-          font-weight: 650;
-          color: #0f172a;
-          line-height: 1.15;
-        }
-        .event-key {
-          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New",
-            monospace;
-          font-size: 12px;
-          color: #0f172a;
-          background: rgba(59, 130, 246, 0.10);
-          border: 1px solid rgba(59, 130, 246, 0.16);
-          border-radius: 10px;
-          padding: 3px 8px;
-          width: fit-content;
-        }
-        .event-meta {
-          display: flex;
-          gap: 8px;
-          flex-wrap: wrap;
-          align-items: center;
-        }
-        .event-meta .tag {
-          font-size: 12px;
-          padding: 2px 8px;
-          border-radius: 999px;
-          border: 1px solid rgba(15, 23, 42, 0.12);
-          background: rgba(15, 23, 42, 0.03);
-          color: #0f172a;
-        }
-        .event-trigger {
-          font-size: 12px;
-          line-height: 1.25;
-        }
-        .props {
-          display: flex;
-          flex-direction: column;
-          gap: 6px;
-          margin-top: 8px;
-          padding: 8px;
-          border: 1px solid rgba(15, 23, 42, 0.10);
-          border-radius: 12px;
-          background: rgba(15, 23, 42, 0.02);
-        }
-        .prop {
-          display: grid;
-          grid-template-columns: 160px 120px 1fr;
-          gap: 8px;
-          align-items: start;
-        }
-        .prop-key {
-          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New",
-            monospace;
-          font-size: 12px;
-          background: rgba(59, 130, 246, 0.10);
-          color: #0f172a;
-          border: 1px solid rgba(59, 130, 246, 0.18);
-          border-radius: 10px;
-          padding: 4px 8px;
-          width: fit-content;
-        }
-        .prop-name {
-          font-weight: 600;
-          color: #0f172a;
-        }
-        .prop-desc {
-          line-height: 1.3;
-        }
-        .picker-divider {
-          height: 1px;
-          margin: 6px 4px;
-          background: rgba(15, 23, 42, 0.10);
-        }
-        .dropdown {
-          position: relative;
-        }
-        .dropdown-input-row {
-          display: flex;
-          gap: 8px;
-          align-items: center;
-        }
-        .dropdown-toggle-btn {
-          white-space: nowrap;
-          padding: 10px 12px;
-        }
-        .modal {
-          position: fixed;
-          inset: 0;
-          z-index: 9999;
-          display: none;
-          align-items: flex-start;
-          justify-content: center;
-          padding: 10vh 16px 16px;
-        }
-        .modal-backdrop {
-          position: absolute;
-          inset: 0;
-          background: rgba(15, 23, 42, 0.45);
-          backdrop-filter: blur(2px);
-        }
-        .modal-card {
-          position: relative;
-          width: min(720px, 92vw);
-          max-height: 80vh;
-          overflow: hidden;
-          border-radius: 16px;
-          background: #fff;
-          border: 1px solid rgba(15, 23, 42, 0.12);
-          box-shadow: 0 24px 60px rgba(15, 23, 42, 0.30);
-        }
-        .modal-header {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          padding: 12px 14px;
-          border-bottom: 1px solid rgba(15, 23, 42, 0.08);
-          background: rgba(15, 23, 42, 0.02);
-        }
-        .modal-title {
-          font-weight: 650;
-          color: #0f172a;
-        }
-        .modal-body {
-          padding: 12px;
-          max-height: calc(80vh - 56px);
-          overflow: auto;
-        }
-        .icon-btn {
-          border: 1px solid rgba(15, 23, 42, 0.12);
-          background: #fff;
-          border-radius: 10px;
-          padding: 6px 10px;
-          cursor: pointer;
-        }
-        .icon-btn:hover {
-          background: rgba(59, 130, 246, 0.08);
-        }
-        details.cat {
-          border: 1px solid rgba(15, 23, 42, 0.08);
-          border-radius: 12px;
-          background: #fff;
-          margin-bottom: 8px;
-          overflow: hidden;
-        }
-        details.cat[open] {
-          background: rgba(15, 23, 42, 0.01);
-        }
-        .cat-title {
-          cursor: pointer;
-          user-select: none;
-          padding: 8px 10px;
-          font-weight: 600;
-          color: #0f172a;
-          background: rgba(15, 23, 42, 0.03);
-        }
-        details.cat .picker-item {
-          padding: 6px 10px;
-        }
-        th:nth-child(2),
-        td:nth-child(2) {
-          display: none;
-        }
-      }
-    </style>
-  </head>
-  <body>
-    <div class="container">
-      <h1>埋点实时查看工具</h1>
-      <div class="subtitle">输入测试用的 device_id，保持浏览器开着，在手机上走流程时即可实时看到该设备的埋点是否落库。</div>
+<head>
+<meta charset="utf-8">
+<title>埋点实时查看工具</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root { --accent: #2563eb; --accent-light: #eff6ff; --green: #10b981; --green-light: #ecfdf5; --red: #ef4444; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; padding: 0; background: #f8fafc; color: #0f172a; }
+.container { max-width: 1200px; margin: 0 auto; padding: 24px 16px 40px; }
+h1 { font-size: 22px; margin-bottom: 4px; font-weight: 700; letter-spacing: -0.02em; color: #0f172a; }
+.subtitle { font-size: 13px; color: #94a3b8; margin-bottom: 20px; }
+.card { background: #ffffff; border-radius: 12px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.06); border: 1px solid #e2e8f0; margin-bottom: 16px; }
+.form-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+.field { display: flex; flex-direction: column; min-width: 0; }
+.field label { font-size: 11px; color: #64748b; margin-bottom: 4px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.04em; }
+.field input, .field select { border-radius: 8px; border: 1px solid #d1d5db; padding: 8px 12px; font-size: 14px; min-width: 0; transition: border-color 0.15s, box-shadow 0.15s; }
+.field input:focus, .field select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }
+.btn { border-radius: 8px; border: none; padding: 10px 20px; font-size: 14px; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: all 0.15s ease; font-family: inherit; }
+.btn-primary { background: var(--accent); color: white; }
+.btn-primary:hover { background: #1d4ed8; box-shadow: 0 2px 8px rgba(37,99,235,0.3); }
+.btn-primary:active { transform: scale(0.97); }
+.btn-secondary { background: #f1f5f9; color: #334155; }
+.btn-secondary:hover { background: #e2e8f0; }
+.status-line { margin-top: 12px; font-size: 12px; color: #6b7280; display: flex; justify-content: space-between; gap: 12px; }
+.status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 999px; background: var(--green-light); color: #065f46; font-size: 12px; font-weight: 500; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+@keyframes pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(16,185,129,0.4); } 50% { box-shadow: 0 0 0 6px rgba(16,185,129,0); } }
+.muted { color: #9ca3af; font-size: 12px; }
+.error-text { color: var(--red); font-size: 12px; font-weight: 500; }
+.scroll-container { margin-top: 4px; max-height: 500px; overflow: auto; border-radius: 10px; border: 1px solid #e2e8f0; background: #fff; }
+.scroll-container::-webkit-scrollbar { width: 6px; }
+.scroll-container::-webkit-scrollbar-track { background: transparent; }
+.scroll-container::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+.scroll-container::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+thead { background: #f1f5f9; position: sticky; top: 0; z-index: 1; }
+th, td { padding: 10px 12px; border-bottom: 1px solid #f1f5f9; text-align: left; }
+th { font-weight: 600; color: #475569; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+td { vertical-align: top; }
+tbody tr { transition: background 0.15s ease; }
+tbody tr:hover { background: #f8fafc; }
+tbody tr.highlight { animation: highlight 2s ease-out; }
+@keyframes highlight { 0% { background-color: #dbeafe; } 100% { background-color: transparent; } }
+.pill { display: inline-flex; padding: 3px 10px; border-radius: 999px; background: var(--accent-light); color: var(--accent); font-size: 11px; font-weight: 500; font-family: 'JetBrains Mono', monospace; }
+pre { margin: 0; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 120px; overflow: auto; line-height: 1.5; }
+pre::-webkit-scrollbar { width: 4px; }
+pre::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 2px; }
+.toast { position: fixed; bottom: 24px; right: 24px; padding: 10px 18px; background: #0f172a; color: #fff; border-radius: 10px; font-size: 13px; font-weight: 500; transform: translateY(20px); opacity: 0; transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1); z-index: 10000; box-shadow: 0 8px 24px rgba(0,0,0,0.16); }
+.toast.show { transform: translateY(0); opacity: 1; }
+.modal { position: fixed; inset: 0; z-index: 9999; display: none; align-items: flex-start; justify-content: center; padding: 5vh 16px; }
+.modal.active { display: flex; }
+.modal-backdrop { position: absolute; inset: 0; background: rgba(15,23,42,0.4); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
+.modal-card { position: relative; width: min(600px, 95vw); max-height: 80vh; background: #fff; border-radius: 12px; box-shadow: 0 20px 40px rgba(0,0,0,0.3); display: flex; flex-direction: column; }
+.modal-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid #e5e7eb; }
+.modal-title { font-size: 16px; font-weight: 600; }
+.modal-body { padding: 16px 20px; overflow: auto; flex: 1; }
+.modal-footer { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; border-top: 1px solid #e5e7eb; background: #f9fafb; }
+.search-box { display: flex; gap: 10px; margin-bottom: 16px; }
+.search-box input { flex: 1; border-radius: 8px; border: 1px solid #d1d5db; padding: 10px 14px; font-size: 14px; }
+.search-box input:focus { outline: none; border-color: #2563eb; }
+.category-section { margin-bottom: 12px; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; }
+.category-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: #f9fafb; cursor: pointer; user-select: none; }
+.category-header:hover { background: #f3f4f6; }
+.category-title { font-weight: 600; font-size: 14px; }
+.category-count { font-size: 12px; color: #6b7280; background: #fff; padding: 2px 8px; border-radius: 999px; }
+.category-items { padding: 8px; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
+.event-item { display: flex; align-items: flex-start; gap: 8px; padding: 10px; border-radius: 6px; border: 1px solid #e5e7eb; background: #fff; cursor: pointer; transition: all 0.15s ease; }
+.event-item:hover { border-color: #2563eb; background: #eff6ff; }
+.event-item.selected { border-color: #2563eb; background: #eff6ff; }
+.event-checkbox { width: 18px; height: 18px; margin-top: 2px; cursor: pointer; }
+.event-info { flex: 1; }
+.event-name { font-weight: 600; font-size: 13px; margin-bottom: 2px; }
+.event-key { font-family: monospace; font-size: 11px; color: #6b7280; }
+.btn-icon { width: 36px; height: 36px; border-radius: 8px; border: 1px solid #d1d5db; background: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 16px; }
+.btn-icon:hover { background: #f3f4f6; }
+.selected-count { font-size: 14px; color: #64748b; }
+.selected-count strong { color: var(--accent); }
+.category-section.collapsed .category-items { display: none; }
+.json-key { color: #0369a1; }
+.json-string { color: #059669; }
+.json-number { color: #d97706; }
+.json-boolean { color: #7c3aed; }
+.json-null { color: #9ca3af; font-style: italic; }
+@media (max-width: 768px) {
+  .form-row { flex-direction: column; }
+  .field { width: 100%; }
+  .btn { width: 100%; justify-content: center; }
+  .category-items { grid-template-columns: 1fr; }
+  th:nth-child(2), td:nth-child(2) { display: none; }
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>埋点实时查看工具</h1>
+  <div class="subtitle">输入 device_id，实时监控埋点数据落库情况</div>
 
-      <div class="card">
-        <div class="form-row">
-          <div class="field" style="width: 180px;">
-            <label for="devicePresetSelect">常用设备</label>
-            <select id="devicePresetSelect">
-              <option value="">自定义（手动输入）</option>
-              <option value="36D2F2D1-524E-4DDB-9CD1-DF06C32E1404">纪伟的手机</option>
-            </select>
-          </div>
-          <div class="field" style="flex: 1 1 220px;">
-            <label for="deviceIdInput">device_id</label>
-            <input id="deviceIdInput" placeholder="请输入要监听的 device_id" />
-          </div>
-          <div class="field" style="flex: 1 1 420px;">
-            <label for="eventNameInput">事件名筛选（可选）</label>
-            <div class="dropdown-input-row">
-              <input id="eventNameInput" placeholder="支持逗号分隔多个；也可点右侧选择" />
-              <button id="eventNameToggleBtn" type="button" class="btn btn-secondary dropdown-toggle-btn">选择</button>
-            </div>
-          </div>
-          <div class="field" style="width: 120px;">
-            <label for="intervalInput">轮询间隔（秒）</label>
-            <input id="intervalInput" type="number" min="1" max="60" value="3" />
-          </div>
-          <div class="field" style="width: 120px;">
-            <label for="limitInput">最大条数</label>
-            <input id="limitInput" type="number" min="10" max="500" value="100" />
-          </div>
-          <button id="toggleBtn" class="btn btn-primary" style="margin-left: auto;">开始监听</button>
-          <button id="clearBtn" class="btn btn-secondary">清空列表</button>
-        </div>
-        <div class="status-line">
-          <div>
-            <span id="statusPill" class="status-pill" style="display: none;">
-              <span class="status-dot"></span>
-              <span id="statusText">监听中</span>
-            </span>
-            <span id="errorText" class="muted"></span>
-            <span id="clockText" class="muted" style="margin-left: 8px;"></span>
-          </div>
-          <div class="muted" id="metaText"></div>
+  <div class="card">
+    <div class="form-row">
+      <div class="field" style="width:140px">
+        <label>环境</label>
+        <select id="envSelect">
+          <option value="test">测试环境</option>
+          <option value="production">线上环境</option>
+        </select>
+      </div>
+      <div class="field" style="width:180px">
+        <label>常用设备</label>
+        <select id="devicePresetSelect">
+          <option value="">自定义（手动输入）</option>
+          <option value="36D2F2D1-524E-4DDB-9CD1-DF06C32E1404">纪伟的手机</option>
+          <option value="3da7d7e66ff94487">三星的安卓测试机</option>
+        </select>
+      </div>
+      <div class="field" style="flex:1">
+        <label>device_id</label>
+        <input id="deviceIdInput" placeholder="请输入要监听的 device_id">
+      </div>
+      <div class="field" style="flex:1">
+        <label>事件名筛选（可选）</label>
+        <div style="display:flex;gap:8px">
+          <input id="eventNameInput" placeholder="逗号分隔或点击选择" style="flex:1">
+          <button id="eventNameToggleBtn" class="btn-icon" title="选择事件">...</button>
         </div>
       </div>
-
-      <div id="eventNameModal" class="modal" style="display:none;">
-        <div id="eventNameModalBackdrop" class="modal-backdrop"></div>
-        <div class="modal-card" role="dialog" aria-modal="true" aria-label="选择事件名">
-          <div class="modal-header">
-            <div class="modal-title">选择事件名（可复选）</div>
-            <button id="eventNameModalCloseBtn" type="button" class="icon-btn">关闭</button>
-          </div>
-          <div class="modal-body">
-            <div class="picker-actions" style="margin-bottom: 8px;">
-              <input id="eventNameSearch" placeholder="搜索事件名/标识符，如：button / story" />
-              <button id="eventNameClearBtn" type="button" class="btn btn-secondary" style="padding:8px 10px;">清空</button>
-            </div>
-
-            <div id="eventNameCheckboxList" class="picker-list">
-              <div class="muted" id="eventNameStaticHint">按模块分类展示，可复选；勾选会自动写入输入框。</div>
-              <select id="eventNameSelect" multiple size="14" style="width:100%;">
-                <optgroup label="用户启动">
-                  <option value="game_start">游戏启动 (game_start)</option>
-                  <option value="memorySize">启动资源更新结果 (memorySize)</option>
-                  <option value="account_create_result">账户创建成功 (account_create_result)</option>
-                  <option value="role_create_complete">角色创建成功 (role_create_complete)</option>
-                  <option value="screen_view">主要页面曝光 (screen_view)</option>
-                  <option value="button_click">关键按钮点击 (button_click)</option>
-                </optgroup>
-                <optgroup label="事件&剧情">
-                  <option value="event_trigger">事件触发 (event_trigger)</option>
-                  <option value="event_complete">事件完成 (event_complete)</option>
-                  <option value="story_enter">剧情开始 (story_enter)</option>
-                  <option value="story_interrupt">剧情中断 (story_interrupt)</option>
-                  <option value="story_complete">剧情完成 (story_complete)</option>
-                </optgroup>
-                <optgroup label="游戏内操作">
-                  <option value="new_round">人生年份推进 (new_round)</option>
-                  <option value="role_death">死亡（未测试）(role_death)</option>
-                </optgroup>
-                <optgroup label="三方绑定/登录">
-                  <option value="bind_attempt">点击绑定按钮 (bind_attempt)</option>
-                  <option value="bind_result">绑定成功（未测试）(bind_result)</option>
-                  <option value="unbind_result">解除绑定成功（未测试）(unbind_result)</option>
-                  <option value="switch_click">点击切换账号 (switch_click)</option>
-                </optgroup>
-                <optgroup label="新手引导">
-                  <option value="guide_show">引导展示 (guide_show)</option>
-                  <option value="guide_close">引导关闭 (guide_close)</option>
-                </optgroup>
-                <optgroup label="系统解锁">
-                  <option value="feature_status_change">节点成功解锁 (feature_status_change)</option>
-                  <option value="feature_locked_click">点击未解锁节点 (feature_locked_click)</option>
-                </optgroup>
-                <optgroup label="公告和邮箱">
-                  <option value="announcement_show">点击查看公告 (announcement_show)</option>
-                  <option value="mail_receive">收到邮件 (mail_receive)</option>
-                  <option value="mail_reward">领取邮件 (mail_reward)</option>
-                  <option value="mail_claim_fail">领取失败 (mail_claim_fail)</option>
-                </optgroup>
-              </select>
-            </div>
-          </div>
-        </div>
+      <div class="field" style="width:100px">
+        <label>轮询间隔（秒）</label>
+        <input id="intervalInput" type="number" min="1" max="60" value="3">
       </div>
-
-      <div class="scroll-container">
-        <table>
-          <thead>
-            <tr>
-              <th style="width: 110px;">时间</th>
-              <th style="width: 150px;">标识</th>
-              <th style="width: 130px;">事件名</th>
-              <th>全部字段（JSON）</th>
-            </tr>
-          </thead>
-          <tbody id="tbody"></tbody>
-        </table>
+      <div class="field" style="width:100px">
+        <label>最大条数</label>
+        <input id="limitInput" type="number" min="10" max="500" value="100">
       </div>
     </div>
+    <div style="display:flex;gap:10px;margin-top:16px;flex-wrap:wrap">
+      <button id="toggleBtn" class="btn btn-primary">开始监听</button>
+      <button id="clearBtn" class="btn btn-secondary">清空列表</button>
+    </div>
+    <div class="status-line">
+      <div>
+        <span id="statusPill" class="status-pill" style="display:none"><span class="status-dot"></span><span id="statusText">监听中</span></span>
+        <span id="errorText" class="error-text"></span>
+        <span id="clockText" class="muted" style="margin-left:8px"></span>
+      </div>
+      <span id="metaText" class="muted"></span>
+    </div>
+  </div>
 
-    <script>
-      const devicePresetSelect = document.getElementById("devicePresetSelect");
-      const deviceIdInput = document.getElementById("deviceIdInput");
-      const intervalInput = document.getElementById("intervalInput");
-      const limitInput = document.getElementById("limitInput");
-      const toggleBtn = document.getElementById("toggleBtn");
-      const clearBtn = document.getElementById("clearBtn");
-      const tbody = document.getElementById("tbody");
-      const statusPill = document.getElementById("statusPill");
-      const statusText = document.getElementById("statusText");
-      const errorText = document.getElementById("errorText");
-      const metaText = document.getElementById("metaText");
-      const clockText = document.getElementById("clockText");
-      const eventNameInput = document.getElementById("eventNameInput");
-      const eventNameToggleBtn = document.getElementById("eventNameToggleBtn");
-      const eventNameModal = document.getElementById("eventNameModal");
-      const eventNameModalBackdrop = document.getElementById("eventNameModalBackdrop");
-      const eventNameModalCloseBtn = document.getElementById("eventNameModalCloseBtn");
-      const eventNameSearch = document.getElementById("eventNameSearch");
-      const eventNameCheckboxList = document.getElementById("eventNameCheckboxList");
-      const eventNameStaticHint = document.getElementById("eventNameStaticHint");
-      const eventNameSelect = document.getElementById("eventNameSelect");
-      const eventNameClearBtn = document.getElementById("eventNameClearBtn");
+  <div id="eventNameModal" class="modal">
+    <div id="eventNameModalBackdrop" class="modal-backdrop"></div>
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-title">选择事件名</div>
+        <button id="eventNameModalCloseBtn" class="btn-icon">X</button>
+      </div>
+      <div class="modal-body">
+        <div class="search-box">
+          <input id="eventNameSearch" placeholder="搜索事件名...">
+          <button id="eventNameClearBtn" class="btn btn-secondary">清空</button>
+        </div>
+        <div id="eventCategories"></div>
+      </div>
+      <div class="modal-footer">
+        <div class="selected-count">已选择 <strong id="selectedCount">0</strong> 个事件</div>
+        <div style="display:flex;gap:10px">
+          <button id="eventNameModalCancelBtn" class="btn btn-secondary">取消</button>
+          <button id="eventNameModalConfirmBtn" class="btn btn-primary">确认</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
-      // 将前端运行时错误直接展示在页面上，便于快速定位
-      window.addEventListener("error", (e) => {
-        try {
-          const msg = e?.message || "前端脚本错误";
-          errorText.textContent = msg;
-        } catch (_) {}
-      });
-      window.addEventListener("unhandledrejection", (e) => {
-        try {
-          const msg = e?.reason?.message || String(e?.reason || "Promise 错误");
-          errorText.textContent = msg;
-        } catch (_) {}
-      });
+  <div class="scroll-container">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:130px">时间</th>
+          <th style="width:150px">标识</th>
+          <th style="width:120px">事件名</th>
+          <th>全部字段（JSON）</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+</div>
 
-      devicePresetSelect.addEventListener("change", () => {
-        const v = devicePresetSelect.value;
-        if (v) {
-          deviceIdInput.value = v;
-        }
-      });
+<div id="toast" class="toast"></div>
 
-      function normalizeEventNameList(text) {
-        return String(text || "")
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
+<script>
+var envSelect = document.getElementById("envSelect");
+var devicePresetSelect = document.getElementById("devicePresetSelect");
+var deviceIdInput = document.getElementById("deviceIdInput");
+var intervalInput = document.getElementById("intervalInput");
+var limitInput = document.getElementById("limitInput");
+var toggleBtn = document.getElementById("toggleBtn");
+var clearBtn = document.getElementById("clearBtn");
+var tbody = document.getElementById("tbody");
+var statusPill = document.getElementById("statusPill");
+var statusText = document.getElementById("statusText");
+var errorText = document.getElementById("errorText");
+var metaText = document.getElementById("metaText");
+var clockText = document.getElementById("clockText");
+var eventNameInput = document.getElementById("eventNameInput");
+var eventNameToggleBtn = document.getElementById("eventNameToggleBtn");
+var eventNameModal = document.getElementById("eventNameModal");
+var eventNameModalBackdrop = document.getElementById("eventNameModalBackdrop");
+var eventNameModalCloseBtn = document.getElementById("eventNameModalCloseBtn");
+var eventNameModalCancelBtn = document.getElementById("eventNameModalCancelBtn");
+var eventNameModalConfirmBtn = document.getElementById("eventNameModalConfirmBtn");
+var eventNameSearch = document.getElementById("eventNameSearch");
+var eventNameClearBtn = document.getElementById("eventNameClearBtn");
+var eventCategories = document.getElementById("eventCategories");
+var selectedCount = document.getElementById("selectedCount");
+var toast = document.getElementById("toast");
+
+var timerId = null;
+var lastMaxId = null;
+var maxSeenId = null;
+var lastIdentifierForCursor = null;
+var clockTimerId = null;
+var clearBaselineId = null;
+var selectedEvents = {};
+
+var eventCategoriesData = [
+  {name:"用户启动", events:[
+    {key:"game_start",name:"游戏启动"},
+    {key:"memorySize",name:"启动资源更新结果"},
+    {key:"account_create_result",name:"账户创建成功"},
+    {key:"role_create_complete",name:"角色创建成功"},
+    {key:"screen_view",name:"主要页面曝光"},
+    {key:"button_click",name:"关键按钮点击"}
+  ]},
+  {name:"事件&剧情", events:[
+    {key:"event_trigger",name:"事件触发"},
+    {key:"event_complete",name:"事件完成"},
+    {key:"story_enter",name:"剧情开始"},
+    {key:"story_interrupt",name:"剧情中断"},
+    {key:"story_complete",name:"剧情完成"}
+  ]},
+  {name:"游戏内操作", events:[
+    {key:"new_round",name:"人生年份推进"},
+    {key:"role_death",name:"死亡"}
+  ]},
+  {name:"三方绑定/登录", events:[
+    {key:"bind_attempt",name:"点击绑定按钮"},
+    {key:"bind_result",name:"绑定成功"},
+    {key:"unbind_result",name:"解除绑定成功"},
+    {key:"switch_click",name:"点击切换账号"}
+  ]},
+  {name:"新手引导", events:[
+    {key:"guide_show",name:"引导展示"},
+    {key:"guide_close",name:"引导关闭"}
+  ]},
+  {name:"系统解锁", events:[
+    {key:"feature_status_change",name:"节点成功解锁"},
+    {key:"feature_locked_click",name:"点击未解锁节点"}
+  ]},
+  {name:"公告和邮箱", events:[
+    {key:"announcement_show",name:"点击查看公告"},
+    {key:"mail_receive",name:"收到邮件"},
+    {key:"mail_reward",name:"领取邮件"},
+    {key:"mail_claim_fail",name:"领取失败"}
+  ]}
+];
+
+window.onerror = function(msg) { errorText.textContent = msg; };
+
+function highlightJSON(json) {
+  if (typeof json !== "string") json = JSON.stringify(json, null, 2);
+  var escaped = json.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return escaped.replace(
+    /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\\b(true|false)\\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?|\\bnull\\b)/g,
+    function(match) {
+      if (/^"/.test(match)) {
+        if (/:$/.test(match)) return '<span class="json-key">' + match + '</span>';
+        return '<span class="json-string">' + match + '</span>';
       }
+      if (/true|false/.test(match)) return '<span class="json-boolean">' + match + '</span>';
+      if (/null/.test(match)) return '<span class="json-null">' + match + '</span>';
+      return '<span class="json-number">' + match + '</span>';
+    }
+  );
+}
 
-      function setEventNameInput(values) {
-        const unique = Array.from(new Set(values.map((v) => String(v).trim()).filter(Boolean)));
-        eventNameInput.value = unique.join(",");
+function showToast(msg) {
+  toast.textContent = msg;
+  toast.className = "toast show";
+  setTimeout(function() { toast.className = "toast"; }, 2000);
+}
+
+devicePresetSelect.onchange = function() {
+  if (this.value) {
+    deviceIdInput.value = this.value;
+  }
+};
+
+deviceIdInput.oninput = function() {
+  var val = this.value.trim();
+  var found = false;
+  for (var i = 0; i < devicePresetSelect.options.length; i++) {
+    if (devicePresetSelect.options[i].value === val) {
+      devicePresetSelect.selectedIndex = i;
+      found = true;
+      break;
+    }
+  }
+  if (!found) devicePresetSelect.selectedIndex = 0;
+};
+
+function formatTime(value) {
+  if (!value) return "";
+  var d = new Date(value);
+  if (isNaN(d.getTime())) return value;
+  var pad = function(n) { return n < 10 ? "0" + n : "" + n; };
+  return (d.getMonth()+1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+}
+
+function setRunning(running) {
+  if (running) {
+    toggleBtn.textContent = "停止监听";
+    toggleBtn.className = "btn btn-primary";
+    statusPill.style.display = "inline-flex";
+    statusText.textContent = "监听中";
+  } else {
+    toggleBtn.textContent = "开始监听";
+    toggleBtn.className = "btn btn-primary";
+    statusPill.style.display = "none";
+  }
+}
+
+function startClock() {
+  if (clockTimerId) return;
+  var update = function() { clockText.textContent = formatTime(new Date().toISOString()); };
+  update();
+  clockTimerId = setInterval(update, 1000);
+}
+
+async function loadEnvs() {
+  try {
+    var res = await fetch("/envs");
+    var data = await res.json();
+    envSelect.innerHTML = "";
+    for (var key in data) {
+      if (data[key].available) {
+        var opt = document.createElement("option");
+        opt.value = key;
+        opt.textContent = data[key].name;
+        envSelect.appendChild(opt);
       }
+    }
+  } catch (e) {
+    console.error("Failed to load envs:", e);
+  }
+}
 
-      function syncCheckboxesFromInput() {
-        const selected = new Set(normalizeEventNameList(eventNameInput.value));
-        const options = eventNameSelect.options;
-        for (let i = 0; i < options.length; i++) {
-          const opt = options[i];
-          if (!opt.value) continue;
-          opt.selected = selected.has(opt.value);
-        }
+async function fetchEvents() {
+  var deviceId = deviceIdInput.value.trim();
+  if (!deviceId) {
+    errorText.textContent = "请先填写 device_id";
+    stop();
+    return;
+  }
+  var params = new URLSearchParams();
+  params.set("device_id", deviceId);
+  params.set("env", envSelect.value || "test");
+  params.set("limit", limitInput.value || "100");
+  var eventNameFilter = eventNameInput.value.trim();
+  if (eventNameFilter) params.set("event_name", eventNameFilter);
+  var since = maxSeenId || clearBaselineId;
+  if (since) params.set("since_id", String(since));
+
+  try {
+    var res = await fetch("/events?" + params.toString());
+    if (!res.ok) {
+      var data = await res.json().catch(function() { return {}; });
+      throw new Error(data.error || "请求失败：" + res.status);
+    }
+    var data = await res.json();
+    errorText.textContent = "";
+    metaText.textContent = "最近拉取: " + formatTime(new Date().toISOString());
+    if (!Array.isArray(data)) return;
+
+    if (!lastMaxId) tbody.innerHTML = "";
+
+    var fragment = document.createDocumentFragment();
+    for (var i = 0; i < data.length; i++) {
+      var row = data[i];
+      var tr = document.createElement("tr");
+      if (i === 0) tr.className = "highlight";
+      tr.innerHTML = '<td style="white-space:nowrap;font-family:\\\'JetBrains Mono\\\',monospace;font-size:12px;color:#334155">' + formatTime(row.event_time) + '</td>' +
+        '<td style="font-family:\\\'JetBrains Mono\\\',monospace;font-size:11px;color:#94a3b8">' + (row.device_id || "") + '</td>' +
+        '<td><span class="pill">' + (row.event_name || "") + '</span></td>' +
+        '<td><pre>' + highlightJSON(row) + '</pre></td>';
+      fragment.appendChild(tr);
+    }
+
+    if (!lastMaxId) {
+      tbody.appendChild(fragment);
+    } else {
+      tbody.insertBefore(fragment, tbody.firstChild);
+    }
+
+    if (data.length > 0) {
+      var batchMaxId = maxSeenId || 0;
+      for (var j = 0; j < data.length; j++) {
+        if (data[j].id > batchMaxId) batchMaxId = data[j].id;
       }
+      lastMaxId = batchMaxId;
+      maxSeenId = batchMaxId;
+    }
+  } catch (e) {
+    errorText.textContent = e.message || String(e);
+  }
+}
 
-      function syncInputFromCheckboxes() {
-        const values = Array.from(eventNameSelect.selectedOptions).map((o) => o.value);
-        setEventNameInput(values);
+function start() {
+  if (timerId) return;
+  var deviceId = deviceIdInput.value.trim();
+  if (!deviceId) {
+    errorText.textContent = "请先填写 device_id";
+    showToast("请先填写 device_id");
+    return;
+  }
+  errorText.textContent = "";
+  if (lastIdentifierForCursor !== deviceId) {
+    maxSeenId = null;
+    lastIdentifierForCursor = deviceId;
+  }
+  lastMaxId = null;
+  setRunning(true);
+  startClock();
+  fetchEvents();
+  var intervalSec = Math.max(1, Math.min(60, Number(intervalInput.value) || 3));
+  timerId = setInterval(fetchEvents, intervalSec * 1000);
+  showToast("监听已启动");
+}
+
+function stop() {
+  if (timerId) {
+    clearInterval(timerId);
+    timerId = null;
+  }
+  setRunning(false);
+  showToast("监听已停止");
+}
+
+function clearLogs() {
+  clearBaselineId = maxSeenId || clearBaselineId;
+  tbody.innerHTML = "";
+  lastMaxId = null;
+  maxSeenId = null;
+  metaText.textContent = "";
+  errorText.textContent = "";
+  showToast("已清空");
+}
+
+toggleBtn.onclick = function() {
+  if (timerId) { stop(); } else { start(); }
+};
+
+clearBtn.onclick = clearLogs;
+
+deviceIdInput.onkeydown = function(e) {
+  if (e.key === "Enter") start();
+};
+
+function renderEventCategories(filter) {
+  filter = filter || "";
+  var q = filter.toLowerCase();
+  var html = "";
+
+  for (var c = 0; c < eventCategoriesData.length; c++) {
+    var cat = eventCategoriesData[c];
+    var filtered = [];
+    for (var e = 0; e < cat.events.length; e++) {
+      var ev = cat.events[e];
+      if (!q || ev.name.toLowerCase().indexOf(q) >= 0 || ev.key.toLowerCase().indexOf(q) >= 0) {
+        filtered.push(ev);
       }
+    }
+    if (filtered.length === 0) continue;
 
-      function filterEventCheckboxes() {
-        const q = (eventNameSearch.value || "").trim().toLowerCase();
-        const options = eventNameSelect.options;
-        for (let i = 0; i < options.length; i++) {
-          const opt = options[i];
-          const text = (opt.textContent || "").toLowerCase();
-          // 无法真正隐藏 option（各浏览器差异大），用 disabled 模拟过滤
-          opt.disabled = !!q && !text.includes(q);
-        }
-      }
+    var itemsHtml = "";
+    for (var i = 0; i < filtered.length; i++) {
+      var ev = filtered[i];
+      var isSel = selectedEvents[ev.key] ? true : false;
+      itemsHtml += '<div class="event-item' + (isSel ? ' selected' : '') + '" data-key="' + ev.key + '">';
+      itemsHtml += '<input type="checkbox" class="event-checkbox"' + (isSel ? ' checked' : '') + '>';
+      itemsHtml += '<div class="event-info"><div class="event-name">' + ev.name + '</div>';
+      itemsHtml += '<div class="event-key">' + ev.key + '</div></div></div>';
+    }
 
-      function renderCatalog() {
-        // select/optgroup 已在 HTML 里固定，这里只做同步
-        eventNameStaticHint.style.display = "";
-        syncCheckboxesFromInput();
-        filterEventCheckboxes();
-      }
+    html += '<div class="category-section">';
+    html += '<div class="category-header"><span class="category-title">' + cat.name + '</span>';
+    html += '<span class="category-count">' + filtered.length + '/' + cat.events.length + '</span></div>';
+    html += '<div class="category-items">' + itemsHtml + '</div></div>';
+  }
 
-      function setEventModalOpen(open) {
-        eventNameModal.style.display = open ? "flex" : "none";
-        document.body.style.overflow = open ? "hidden" : "";
-        if (open) {
-          renderCatalog();
-          eventNameSearch.focus();
-        } else {
-          eventNameSearch.value = "";
-          filterEventCheckboxes();
-        }
-      }
+  if (!html) html = '<div style="text-align:center;padding:40px;color:#9ca3af">没有找到匹配的事件</div>';
+  eventCategories.innerHTML = html;
 
-      function isEventModalOpen() {
-        return eventNameModal.style.display !== "none";
-      }
+  var headers = eventCategories.querySelectorAll(".category-header");
+  for (var h = 0; h < headers.length; h++) {
+    headers[h].onclick = function() {
+      this.parentElement.classList.toggle("collapsed");
+    };
+  }
 
-      eventNameToggleBtn.addEventListener("click", (e) => {
-        e.preventDefault();
-        setEventModalOpen(!isEventModalOpen());
-      });
+  var items = eventCategories.querySelectorAll(".event-item");
+  for (var k = 0; k < items.length; k++) {
+    items[k].onclick = function(e) {
+      if (e.target.type === "checkbox") return;
+      var cb = this.querySelector(".event-checkbox");
+      cb.checked = !cb.checked;
+      var key = this.dataset.key;
+      if (cb.checked) { selectedEvents[key] = true; this.classList.add("selected"); }
+      else { delete selectedEvents[key]; this.classList.remove("selected"); }
+      updateSelectedCount();
+    };
+    items[k].querySelector(".event-checkbox").onchange = function() {
+      var item = this.closest(".event-item");
+      var key = item.dataset.key;
+      if (this.checked) { selectedEvents[key] = true; item.classList.add("selected"); }
+      else { delete selectedEvents[key]; item.classList.remove("selected"); }
+      updateSelectedCount();
+    };
+  }
+  updateSelectedCount();
+}
 
-      eventNameInput.addEventListener("focus", () => {
-        // 聚焦输入框时不强制展开，避免打字被打断；需要展开可点“选择”
-      });
+function updateSelectedCount() {
+  var count = 0;
+  for (var k in selectedEvents) { if (selectedEvents[k]) count++; }
+  selectedCount.textContent = count;
+}
 
-      eventNameModalBackdrop.addEventListener("click", () => {
-        if (isEventModalOpen()) setEventModalOpen(false);
-      });
+function syncEventsFromInput() {
+  selectedEvents = {};
+  var parts = eventNameInput.value.split(",");
+  for (var i = 0; i < parts.length; i++) {
+    var v = parts[i].trim();
+    if (v) selectedEvents[v] = true;
+  }
+}
 
-      eventNameModalCloseBtn.addEventListener("click", () => {
-        if (isEventModalOpen()) setEventModalOpen(false);
-      });
+function syncInputFromEvents() {
+  var arr = [];
+  for (var k in selectedEvents) { if (selectedEvents[k]) arr.push(k); }
+  eventNameInput.value = arr.join(",");
+}
 
-      document.addEventListener("keydown", (e) => {
-        if (e.key === "Escape" && isEventModalOpen()) {
-          setEventModalOpen(false);
-        }
-      });
+function setEventModalOpen(open) {
+  eventNameModal.className = open ? "modal active" : "modal";
+  document.body.style.overflow = open ? "hidden" : "";
+  if (open) { syncEventsFromInput(); renderEventCategories(); eventNameSearch.focus(); }
+  else { eventNameSearch.value = ""; }
+}
 
-      eventNameSelect.addEventListener("change", () => {
-        syncInputFromCheckboxes();
-      });
+eventNameToggleBtn.onclick = function() {
+  setEventModalOpen(!eventNameModal.classList.contains("active"));
+};
 
-      eventNameInput.addEventListener("input", () => {
-        syncCheckboxesFromInput();
-      });
+eventNameModalBackdrop.onclick = function() { setEventModalOpen(false); };
+eventNameModalCloseBtn.onclick = function() { setEventModalOpen(false); };
+eventNameModalCancelBtn.onclick = function() { setEventModalOpen(false); };
 
-      eventNameSearch.addEventListener("input", () => {
-        filterEventCheckboxes();
-      });
+eventNameModalConfirmBtn.onclick = function() {
+  syncInputFromEvents();
+  setEventModalOpen(false);
+  showToast("已更新事件筛选");
+};
 
-      eventNameClearBtn.addEventListener("click", () => {
-        setEventNameInput([]);
-        syncCheckboxesFromInput();
-        eventNameSearch.value = "";
-        filterEventCheckboxes();
-      });
+eventNameSearch.oninput = function() { renderEventCategories(this.value); };
 
-      // 初始化一次
-      syncCheckboxesFromInput();
-      filterEventCheckboxes();
+eventNameClearBtn.onclick = function() {
+  selectedEvents = {};
+  renderEventCategories(eventNameSearch.value);
+  showToast("已清空选择");
+};
 
-      deviceIdInput.addEventListener("input", () => {
-        const cur = deviceIdInput.value.trim();
-        let matched = false;
-        for (const opt of devicePresetSelect.options) {
-          if (opt.value && opt.value === cur) {
-            matched = true;
-            devicePresetSelect.value = opt.value;
-            break;
-          }
-        }
-        if (!matched && devicePresetSelect.value) {
-          devicePresetSelect.value = "";
-        }
-      });
+document.onkeydown = function(e) {
+  if (e.key === "Escape" && eventNameModal.classList.contains("active")) {
+    setEventModalOpen(false);
+  }
+};
 
-      let timerId = null;
-      // lastMaxId：本次会话中用于控制“首屏覆盖 / 增量插入”的游标
-      let lastMaxId = null;
-      // maxSeenId：当前 user_id 已经看过的最大 id，用于传给后端 since_id，避免重复拉取
-      let maxSeenId = null;
-      let lastIdentifierForCursor = null;
-      let clockTimerId = null;
-      let clearBaselineId = null;
-
-      function setRunning(running) {
-        if (running) {
-          toggleBtn.textContent = "停止监听";
-          toggleBtn.classList.remove("btn-secondary");
-          toggleBtn.classList.add("btn-primary");
-          statusPill.style.display = "inline-flex";
-          statusText.textContent = "监听中";
-        } else {
-          toggleBtn.textContent = "开始监听";
-          toggleBtn.classList.remove("btn-primary");
-          toggleBtn.classList.add("btn-secondary");
-          statusPill.style.display = "none";
-        }
-      }
-
-      function startClock() {
-        if (clockTimerId) return;
-        const update = () => {
-          const nowIso = new Date().toISOString();
-          clockText.textContent = "当前时间：" + formatTime(nowIso);
-        };
-        update();
-        clockTimerId = setInterval(update, 1000);
-      }
-
-      function formatTime(value) {
-        if (!value) return "";
-        const d = new Date(value);
-        if (isNaN(d.getTime())) return value;
-        const pad = (n) => (n < 10 ? "0" + n : "" + n);
-        return (
-          d.getMonth() +
-          1 +
-          "-" +
-          pad(d.getDate()) +
-          " " +
-          pad(d.getHours()) +
-          ":" +
-          pad(d.getMinutes()) +
-          ":" +
-          pad(d.getSeconds())
-        );
-      }
-
-      async function fetchEvents() {
-        const deviceId = deviceIdInput.value.trim();
-        if (!deviceId) {
-          errorText.textContent = "请先填写 device_id";
-          stop();
-          return;
-        }
-        const limit = limitInput.value || "100";
-
-        const params = new URLSearchParams({ limit: limit });
-        params.set("device_id", deviceId);
-        const eventNameFilter = eventNameInput.value.trim();
-        if (eventNameFilter) {
-          params.set("event_name", eventNameFilter);
-        }
-        const since = maxSeenId ?? clearBaselineId;
-        if (since) params.set("since_id", String(since));
-
-        try {
-          const res = await fetch("/events?" + params.toString());
-          if (!res.ok) {
-            const data = await res.json().catch(() => ({}));
-            throw new Error(data.error || "请求失败：" + res.status);
-          }
-          const data = await res.json();
-
-          const now = new Date();
-          metaText.textContent = `最新拉取：${formatTime(now.toISOString())}，共 ${data.length} 条`;
-          errorText.textContent = "";
-
-          if (!Array.isArray(data)) return;
-
-          // 如果是第一次拉取（没有 lastMaxId），就直接整体覆盖；
-          // 如果是增量拉取，则在现有行前面插入新行。
-          if (!lastMaxId) {
-            tbody.innerHTML = "";
-          }
-
-          const fragment = document.createDocumentFragment();
-
-          data.forEach((row, index) => {
-            const tr = document.createElement("tr");
-            if (index === 0) {
-              tr.classList.add("highlight");
-            }
-            const timeTd = document.createElement("td");
-            timeTd.textContent = formatTime(row.event_time);
-
-            const deviceIdTd = document.createElement("td");
-            deviceIdTd.textContent = row.device_id ?? "";
-
-            const eventNameTd = document.createElement("td");
-            const pill = document.createElement("span");
-            pill.className = "pill";
-            pill.textContent = row.event_name || "";
-            eventNameTd.appendChild(pill);
-
-            const contentTd = document.createElement("td");
-            const pre = document.createElement("pre");
-            let text = "";
-            if (row) {
-              try {
-                text = JSON.stringify(row, null, 2);
-              } catch (e) {
-                text = String(row);
-              }
-            }
-            pre.textContent = text;
-            contentTd.appendChild(pre);
-
-            tr.appendChild(timeTd);
-            tr.appendChild(deviceIdTd);
-            tr.appendChild(eventNameTd);
-            tr.appendChild(contentTd);
-            fragment.appendChild(tr);
-          });
-          if (!lastMaxId) {
-            tbody.appendChild(fragment);
-          } else {
-            // 有增量时，把新数据插到表头
-            tbody.insertBefore(fragment, tbody.firstChild);
-          }
-
-          if (data.length > 0) {
-            const batchMaxId = data.reduce(
-              (max, row) => (row.id > max ? row.id : max),
-              maxSeenId || 0
-            );
-            lastMaxId = batchMaxId;
-            maxSeenId = batchMaxId;
-          }
-        } catch (e) {
-          console.error(e);
-          errorText.textContent = e.message || String(e);
-        }
-      }
-
-      function start() {
-        if (timerId) return;
-        const deviceId = deviceIdInput.value.trim();
-        if (!deviceId) {
-          errorText.textContent = "请先填写 device_id";
-          return;
-        }
-        errorText.textContent = "";
-        // 如果切换了 device_id，就从最新开始重新拉，这时清空已见过游标
-        if (lastIdentifierForCursor !== deviceId) {
-          maxSeenId = null;
-          lastIdentifierForCursor = deviceId;
-        }
-        lastMaxId = null;
-        setRunning(true);
-        startClock();
-        fetchEvents();
-        const intervalSec = Math.max(1, Math.min(60, Number(intervalInput.value) || 3));
-        timerId = setInterval(fetchEvents, intervalSec * 1000);
-      }
-
-      function stop() {
-        if (timerId) {
-          clearInterval(timerId);
-          timerId = null;
-        }
-        setRunning(false);
-      }
-
-      function clearLogs() {
-        // 目标：清空后不再把旧数据重新展示出来，只展示“清空之后新增”的数据
-        clearBaselineId = maxSeenId ?? clearBaselineId;
-        tbody.innerHTML = "";
-        lastMaxId = null;
-        maxSeenId = null;
-        metaText.textContent = "";
-        errorText.textContent = "";
-      }
-
-      toggleBtn.addEventListener("click", () => {
-        if (timerId) {
-          stop();
-        } else {
-          start();
-        }
-      });
-
-      clearBtn.addEventListener("click", () => {
-        clearLogs();
-      });
-
-
-      deviceIdInput.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          start();
-        }
-      });
-    </script>
-  </body>
+loadEnvs();
+</script>
+</body>
 </html>
 """
 
@@ -1097,4 +745,3 @@ def index() -> Any:
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8888, debug=True)
-
