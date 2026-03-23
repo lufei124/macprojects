@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from flask import Flask, jsonify, render_template_string, request
@@ -42,8 +42,10 @@ def envs() -> Any:
 @app.route("/events")
 def events() -> Any:
     device_id = request.args.get("device_id", "").strip()
-    if not device_id:
-        return jsonify({"error": "device_id is required"}), 400
+    user_id_param = request.args.get("user_id", "").strip()
+
+    if not device_id and not user_id_param:
+        return jsonify({"error": "device_id or user_id is required"}), 400
 
     env = request.args.get("env", DEFAULT_ENV).strip()
     if env not in DB_CONFIGS:
@@ -85,9 +87,21 @@ def events() -> Any:
         SELECT
             *
         FROM {table}
-        WHERE device_id = %s
+        WHERE 1=1
     """
-    params: List[Any] = [device_id]
+    params: List[Any] = []
+
+    if device_id:
+        query += " AND device_id = %s"
+        params.append(device_id)
+
+    if user_id_param:
+        try:
+            user_id_int = int(user_id_param)
+            query += " AND user_id = %s"
+            params.append(user_id_int)
+        except ValueError:
+            return jsonify({"error": "user_id must be an integer"}), 400
 
     if event_names:
         placeholders = ",".join(["%s"] * len(event_names))
@@ -121,6 +135,11 @@ def events() -> Any:
                     item[key] = value.decode(errors="ignore")
             elif isinstance(value, datetime):
                 item[key] = value.isoformat()
+
+        event_time_val = item.get("event_time")
+        if isinstance(event_time_val, int) and event_time_val > 1_000_000_000_000:
+            beijing_tz = timezone(timedelta(hours=8))
+            item["event_time"] = datetime.fromtimestamp(event_time_val / 1000, tz=beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
 
         for big_int_key in ("role_id", "user_id"):
             v = item.get(big_int_key)
