@@ -17,8 +17,19 @@ def _load_env_config(prefix: str, display_name: str) -> dict:
     }
 
 
+_test_cfg = _load_env_config("TEST", "测试环境")
+
 DB_CONFIGS = {
-    "test": _load_env_config("TEST", "测试环境"),
+    "test": _test_cfg,
+    "uat": {
+        "name": "UAT环境",
+        "host": _test_cfg["host"],
+        "port": _test_cfg["port"],
+        "user": _test_cfg["user"],
+        "password": _test_cfg["password"],
+        "database": os.getenv("UAT_DB_DATABASE", "restart_life_uat"),
+        "table": _test_cfg["table"],
+    },
     "production": _load_env_config("PROD", "线上环境"),
 }
 DEFAULT_ENV = "test"

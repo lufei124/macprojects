@@ -247,6 +247,7 @@ pre::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 2px; }
         <label>环境</label>
         <select id="envSelect">
           <option value="test">测试环境</option>
+          <option value="uat">UAT环境</option>
           <option value="production">线上环境</option>
         </select>
       </div>
@@ -256,6 +257,7 @@ pre::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 2px; }
           <option value="">自定义（手动输入）</option>
           <option value="36D2F2D1-524E-4DDB-9CD1-DF06C32E1404">纪伟的手机</option>
           <option value="3da7d7e66ff94487">三星的安卓测试机</option>
+          <option value="c7c43a53670b868f">小米测试手机</option>
         </select>
       </div>
       <div class="field" style="flex:1">
