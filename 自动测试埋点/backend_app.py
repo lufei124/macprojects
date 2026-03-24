@@ -389,6 +389,13 @@ var clockTimerId = null;
 var clearBaselineId = null;
 var selectedEvents = {};
 
+function getCursorKey() {
+  var env = envSelect.value || "test";
+  var deviceId = deviceIdInput.value.trim();
+  var eventFilter = eventNameInput.value.trim();
+  return [env, deviceId, eventFilter].join("|");
+}
+
 var eventCategoriesData = [
   {name:"用户启动", events:[
     {key:"game_start",name:"游戏启动"},
@@ -590,9 +597,11 @@ function start() {
     return;
   }
   errorText.textContent = "";
-  if (lastIdentifierForCursor !== deviceId) {
+  var cursorKey = getCursorKey();
+  if (lastIdentifierForCursor !== cursorKey) {
     maxSeenId = null;
-    lastIdentifierForCursor = deviceId;
+    clearBaselineId = null;
+    lastIdentifierForCursor = cursorKey;
   }
   lastMaxId = null;
   setRunning(true);
@@ -744,6 +753,13 @@ eventNameClearBtn.onclick = function() {
   selectedEvents = {};
   renderEventCategories(eventNameSearch.value);
   showToast("已清空选择");
+};
+
+envSelect.onchange = function() {
+  lastIdentifierForCursor = null;
+  maxSeenId = null;
+  lastMaxId = null;
+  clearBaselineId = null;
 };
 
 document.onkeydown = function(e) {
