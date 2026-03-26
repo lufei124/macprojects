@@ -344,6 +344,7 @@ pre::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 2px; }
           <th style="width:130px">时间</th>
           <th style="width:150px">标识</th>
           <th style="width:120px">事件名</th>
+          <th style="width:140px">事件名称</th>
           <th>全部字段（JSON）</th>
         </tr>
       </thead>
@@ -562,9 +563,11 @@ async function fetchEvents() {
       var row = data[i];
       var tr = document.createElement("tr");
       if (i === 0) tr.className = "highlight";
+      var eventDisplayName = getEventDisplayName(row.event_name);
       tr.innerHTML = '<td style="white-space:nowrap;font-family:\\\'JetBrains Mono\\\',monospace;font-size:12px;color:#334155">' + formatTime(row.event_time) + '</td>' +
         '<td style="font-family:\\\'JetBrains Mono\\\',monospace;font-size:11px;color:#94a3b8">' + (row.device_id || "") + '</td>' +
         '<td><span class="pill">' + (row.event_name || "") + '</span></td>' +
+        '<td style="color:#334155">' + (eventDisplayName || "") + '</td>' +
         '<td><pre>' + highlightJSON(row) + '</pre></td>';
       fragment.appendChild(tr);
     }
@@ -769,6 +772,21 @@ document.onkeydown = function(e) {
 };
 
 loadEnvs();
+
+var EVENT_NAME_MAP = null;
+function getEventDisplayName(key) {
+  if (!key) return "";
+  if (!EVENT_NAME_MAP) {
+    EVENT_NAME_MAP = {};
+    for (var c = 0; c < eventCategoriesData.length; c++) {
+      var cat = eventCategoriesData[c];
+      for (var i = 0; i < cat.events.length; i++) {
+        EVENT_NAME_MAP[cat.events[i].key] = cat.events[i].name;
+      }
+    }
+  }
+  return EVENT_NAME_MAP[key] || "";
+}
 </script>
 </body>
 </html>
